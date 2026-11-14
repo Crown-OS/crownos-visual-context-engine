@@ -1,0 +1,22 @@
+[package]
+name = "context-eval"
+description = "Synthetic, privacy-safe traces of a working day for the visual context engine's tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "context-eval"
+path = "src/main.rs"
+
+[dependencies]
+context-core = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

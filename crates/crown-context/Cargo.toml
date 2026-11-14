@@ -1,0 +1,23 @@
+[package]
+name = "crown-context"
+description = "Command line for the visual context engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "crown-context"
+path = "src/main.rs"
+
+[dependencies]
+context-core = { workspace = true }
+context-protocol = { workspace = true }
+crownos-ipc = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

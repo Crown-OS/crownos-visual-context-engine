@@ -1,0 +1,10 @@
+[Unit]
+Description=CrownOS visual context engine socket
+
+[Socket]
+ListenStream=%t/crownos/crownos-visual-context.sock
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,17 @@
+[package]
+name = "context-engine"
+description = "Segmenter, correlator, classifier and working memory of the visual context engine: pure functions over observations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+context-core = { workspace = true }
+context-protocol = { workspace = true }
+url = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

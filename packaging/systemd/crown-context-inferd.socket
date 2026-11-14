@@ -1,0 +1,9 @@
+[Unit]
+Description=CrownOS context inference worker socket
+
+[Socket]
+ListenStream=%t/crownos/crownos-visual-context-infer.sock
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target

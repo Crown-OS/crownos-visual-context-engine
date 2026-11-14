@@ -1,0 +1,27 @@
+[Unit]
+Description=CrownOS visual context engine
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/crown-contextd
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%S/crownos/context %C/crownos/context
+StateDirectory=crownos/context
+CacheDirectory=crownos/context
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+CPUWeight=20
+IOWeight=20
+MemoryHigh=256M
+Nice=10
+
+[Install]
+WantedBy=graphical-session.target

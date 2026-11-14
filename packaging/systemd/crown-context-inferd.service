@@ -1,0 +1,17 @@
+[Unit]
+Description=CrownOS context inference worker
+After=crown-contextd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/crown-context-inferd
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+DeviceAllow=/dev/dri/* rw
+DeviceAllow=/dev/accel/* rw
+DeviceAllow=/dev/nvidia* rw
+CPUSchedulingPolicy=idle
+Nice=15
