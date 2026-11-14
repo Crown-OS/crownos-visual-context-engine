@@ -7,9 +7,15 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["sqlcipher"]
+# Pages encrypted at rest with SQLCipher; off, the same schema in plain SQLite for machines whose
+# toolchain cannot build it.
+sqlcipher = ["rusqlite/bundled-sqlcipher"]
+
 [dependencies]
 context-core = { workspace = true }
-rusqlite = { workspace = true }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
