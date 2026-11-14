@@ -18,6 +18,7 @@ crownos-ipc = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
+rustix = { version = "1", default-features = false, features = ["std", "event"] }
 
 [lints]
 workspace = true

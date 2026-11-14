@@ -25,8 +25,16 @@ privacy, performance, API and the phased plan. This README is the map of the cod
 ```sh
 cargo test --workspace
 cargo run -p context-eval -- generate --scenario short --out /tmp/day.json
-cargo run -p crown-contextd -- --replay /tmp/day.json --state-dir /tmp/context-state
-crown-context tail
+cargo run -p crown-contextd -- --replay /tmp/day.json --speed 600 --state-dir /tmp/context-state
+crown-context tail                 # context changes and closed segments as they happen
+crown-context timeline --episodes  # today, grouped
+crown-context search damage tracker
+crown-context forget --last-minutes 15
 ```
+
+On a live desktop the daemon binds `crownos_context_v1`, which crownpositor shows only to the
+executables listed in `~/.config/crownos/agents.ron` (`trusted_executables`); a development build
+has to add its own path there. Observation is off until `enabled: true` is set in
+`~/.config/crownos/visual_context.ron`; a replay ignores that switch.
 
 Sibling CrownOS repositories are path dependencies one directory up.

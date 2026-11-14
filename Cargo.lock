@@ -239,6 +239,7 @@ dependencies = [
  "context-core",
  "context-protocol",
  "crownos-ipc",
+ "rustix",
  "serde_json",
 ]
 

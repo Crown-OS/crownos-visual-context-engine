@@ -175,7 +175,11 @@ impl Engine {
         for event in segment_events {
             match &event {
                 SegmentEvent::Opened(segment) | SegmentEvent::Extended(segment) => {
-                    self.working.segment = Some(segment.clone());
+                    let mut labelled = segment.clone();
+                    let (label, confidence) = self.label(&labelled);
+                    labelled.label = label;
+                    labelled.label_confidence = confidence;
+                    self.working.segment = Some(labelled);
                     if matches!(event, SegmentEvent::Opened(_)) {
                         self.working.note_document(&segment.doc_key.to_string());
                         context_changed = true;
@@ -274,16 +278,20 @@ impl Engine {
         })
     }
 
-    /// Labels and scores a segment as it closes.
-    fn finish(&self, segment: &Segment) -> Segment {
-        let mut closed = segment.clone();
+    fn label(&self, segment: &Segment) -> (context_core::ActivityLabel, f32) {
         let app_id = self
             .windows
             .values()
-            .find(|record| record.app_id.to_ascii_lowercase() == closed.app_key)
+            .find(|record| record.app_id.to_ascii_lowercase() == segment.app_key)
             .map(|record| record.app_id.clone())
-            .unwrap_or_else(|| closed.app_key.clone());
-        let (label, confidence) = classify(&app_id, closed.url.as_deref(), &closed.title);
+            .unwrap_or_else(|| segment.app_key.clone());
+        classify(&app_id, segment.url.as_deref(), &segment.title)
+    }
+
+    /// Labels and scores a segment as it closes.
+    fn finish(&self, segment: &Segment) -> Segment {
+        let mut closed = segment.clone();
+        let (label, confidence) = self.label(&closed);
         closed.label = label;
         closed.label_confidence = confidence;
         let copies = self

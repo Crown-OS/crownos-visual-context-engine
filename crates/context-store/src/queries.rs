@@ -36,7 +36,7 @@ pub struct TextLine {
 pub struct TextHit {
     pub segment_id: SegmentId,
     pub snippet: String,
-    pub rank: f64,
+    pub rank: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
