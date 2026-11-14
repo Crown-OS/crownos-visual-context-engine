@@ -1,0 +1,18 @@
+[package]
+name = "context-policy"
+description = "What the context engine may observe: exclusions, sensitivity, secret detectors and the visual_context.ron section"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+context-core = { workspace = true }
+crownos-config = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
