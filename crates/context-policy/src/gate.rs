@@ -3,8 +3,8 @@
 use context_core::WindowRecord;
 use regex::{Regex, RegexSet};
 
-use crate::config::VisualContext;
 use crate::util::glob;
+use crownos_config::schema::VisualContext;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PolicyError {
@@ -53,7 +53,6 @@ pub struct Policy {
     enabled: bool,
     excluded_apps: Vec<String>,
     private_titles: RegexSet,
-    clipboard_apps: Vec<String>,
 }
 
 impl Policy {
@@ -76,7 +75,6 @@ impl Policy {
             enabled: section.enabled,
             excluded_apps: section.excluded_apps.clone(),
             private_titles,
-            clipboard_apps: section.clipboard_apps.clone(),
         })
     }
 
@@ -110,13 +108,6 @@ impl Policy {
             .iter()
             .any(|pattern| glob::matches(pattern, app_id))
     }
-
-    /// Whether clipboard content, not only its metadata, may be read from `app_id`.
-    pub fn clipboard_allowed(&self, app_id: &str) -> bool {
-        self.clipboard_apps
-            .iter()
-            .any(|pattern| glob::matches(pattern, app_id))
-    }
 }
 
 #[cfg(test)]
@@ -133,8 +124,8 @@ mod tests {
 
     fn policy() -> Policy {
         Policy::from_section(&VisualContext {
+            enabled: true,
             excluded_apps: vec!["*bitwarden*".into(), "org.keepassxc.*".into()],
-            clipboard_apps: vec!["code-oss".into()],
             ..VisualContext::default()
         })
         .unwrap()
@@ -189,19 +180,18 @@ mod tests {
     }
 
     #[test]
-    fn plain_windows_are_observed_and_clipboard_is_per_app() {
+    fn plain_windows_are_observed() {
         let policy = policy();
         assert_eq!(
             policy.judge(&window("code-oss", "main.rs")),
             Verdict::Observe
         );
-        assert!(policy.clipboard_allowed("code-oss"));
-        assert!(!policy.clipboard_allowed("firefox"));
     }
 
     #[test]
     fn a_bad_pattern_is_an_error_and_disabled_drops_everything() {
         let bad = VisualContext {
+            enabled: true,
             private_titles: vec!["(".into()],
             ..VisualContext::default()
         };
@@ -209,11 +199,7 @@ mod tests {
             Policy::from_section(&bad),
             Err(PolicyError::Pattern { .. })
         ));
-        let off = Policy::from_section(&VisualContext {
-            enabled: false,
-            ..VisualContext::default()
-        })
-        .unwrap();
+        let off = Policy::from_section(&VisualContext::default()).unwrap();
         assert_eq!(
             off.judge(&window("code-oss", "x")),
             Verdict::Drop(Reason::Disabled)
