@@ -174,8 +174,10 @@ name = "context-engine"
 version = "0.1.0"
 dependencies = [
  "context-core",
+ "context-eval",
  "context-protocol",
  "serde",
+ "serde_json",
  "url",
 ]
 

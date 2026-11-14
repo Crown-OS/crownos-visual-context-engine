@@ -233,8 +233,26 @@ pub fn generate(scenario: Scenario, seed: u64) -> Trace {
     Trace {
         seed,
         observations: generator.observations,
-        gold: generator.gold,
+        gold: merge_gold(generator.gold),
     }
+}
+
+/// Dwells on the same document that only a glance elsewhere separated are one stretch of
+/// attention, which is what the segmenter will find.
+fn merge_gold(gold: Vec<GoldSegment>) -> Vec<GoldSegment> {
+    let mut merged: Vec<GoldSegment> = Vec::with_capacity(gold.len());
+    for segment in gold {
+        if let Some(last) = merged.last_mut()
+            && last.window == segment.window
+            && last.doc_key == segment.doc_key
+            && segment.range.start.since(last.range.end).0 <= Micros::from_secs(2).0
+        {
+            last.range.end = segment.range.end;
+            continue;
+        }
+        merged.push(segment);
+    }
+    merged
 }
 
 impl Generator {
