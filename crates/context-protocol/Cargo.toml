@@ -1,0 +1,19 @@
+[package]
+name = "context-protocol"
+description = "The crownos-ipc wire contract of the visual context engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+context-core = { workspace = true }
+crownos-ipc = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+postcard = { workspace = true }
+
+[lints]
+workspace = true
