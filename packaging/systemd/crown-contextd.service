@@ -2,11 +2,18 @@
 Description=CrownOS visual context engine
 PartOf=graphical-session.target
 After=graphical-session.target
+ConditionPathExists=!/run/archiso
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+ExecStartPre=/bin/sh -c 'test -n "$WAYLAND_DISPLAY"'
 ExecStart=/usr/bin/crown-contextd
 Restart=on-failure
+RestartSec=3
+RuntimeDirectory=crownos
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
@@ -24,4 +31,4 @@ MemoryHigh=256M
 Nice=10
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=default.target

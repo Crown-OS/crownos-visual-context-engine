@@ -1,0 +1,40 @@
+# Maintainer: marvelxcodes <ramakrishnan0046@gmail.com>
+#
+# Builds the checkout this file lives in, so run makepkg from packaging/ with
+# the sibling path dependencies checked out next to the repository, as
+# .github/workflows/package.yml does: ../crownos-config, ../crownos-ipc and
+# ../crownos-protocols (plus whatever those path-depend on).
+
+pkgname=crownos-visual-context-engine
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="The CrownOS visual context engine: crown-contextd and the crown-context CLI"
+arch=(x86_64)
+url="https://github.com/Crown-OS/crownos-visual-context-engine"
+license=('MIT OR Apache-2.0')
+depends=(glibc gcc-libs openssl systemd)
+makedepends=(cargo clang)
+options=(!lto !debug)
+
+_workspace="$startdir/.."
+
+prepare() {
+  cd "$_workspace"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+build() {
+  cd "$_workspace"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --frozen -p crown-contextd -p crown-context
+}
+
+package() {
+  cd "$_workspace"
+  install -Dm755 "$srcdir"/target/release/{crown-contextd,crown-context} -t "$pkgdir/usr/bin"
+  # The socket unit stays out until crown-contextd accepts a listener from LISTEN_FDS.
+  install -Dm644 packaging/systemd/crown-contextd.service -t "$pkgdir/usr/lib/systemd/user"
+  install -d "$pkgdir/usr/lib/systemd/user/default.target.wants"
+  ln -s ../crown-contextd.service "$pkgdir/usr/lib/systemd/user/default.target.wants/crown-contextd.service"
+  install -Dm644 LICENSE-{MIT,APACHE} -t "$pkgdir/usr/share/licenses/$pkgname"
+}
