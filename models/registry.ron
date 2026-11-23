@@ -1,28 +1,140 @@
-// The model catalog crown-context-inferd picks from: per task, the candidates in preference
-// order, with the execution providers each one runs on. Entries are placeholders until the
-// hardware bake-off (docs/08 phase 0) fills in measured latency and accuracy.
+// The model catalog of crown-context-inferd, schema version 2.
+//
+// models: what each model can do, its licence, and the files each runtime loads (paths are
+// relative to the models directory). tasks: the candidates for each task, best first, as
+// model x runtime x device. The router skips candidates that the probe, the policy or a
+// breaker refuses, and orders the devices of one model by the cached micro-benchmark.
+//
+// Paths and quantisations are placeholders and sha256 is empty until the bake-off
+// (docs/08 phase 0) pins the files. A user file at $XDG_CONFIG_HOME/crownos/models.ron
+// replaces models and task lists by name.
 (
-    version: 1,
+    version: 2,
+    models: {
+        "pp-ocrv6-det-tiny-rec-small": (
+            capabilities: [Ocr],
+            licence: "Apache-2.0",
+            artifacts: [
+                Onnx(
+                    graphs: {
+                        "det": (path: "pp-ocrv6/det_tiny.onnx", shapes: {"x": [1, 3, 640, 640]}),
+                        "rec": (path: "pp-ocrv6/rec_small.onnx", shapes: {"x": [32, 3, 48, -1]}),
+                    },
+                    files: {"dict": (path: "pp-ocrv6/dict.txt")},
+                ),
+            ],
+        ),
+        "qwen3.5-2b": (
+            capabilities: [Generate, Vision, JsonOutput],
+            licence: "Apache-2.0",
+            artifacts: [
+                Gguf(
+                    model: (path: "qwen3.5-2b/Qwen3.5-2B-Q4_K_M.gguf"),
+                    mmproj: Some((path: "qwen3.5-2b/mmproj-Qwen3.5-2B-F16.gguf")),
+                    quant: "Q4_K_M",
+                ),
+                Remote(name: "qwen3.5-2b"),
+            ],
+        ),
+        "qwen3.5-4b": (
+            capabilities: [Generate, Vision, JsonOutput],
+            licence: "Apache-2.0",
+            artifacts: [
+                Gguf(
+                    model: (path: "qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf"),
+                    mmproj: Some((path: "qwen3.5-4b/mmproj-Qwen3.5-4B-F16.gguf")),
+                    quant: "Q4_K_M",
+                ),
+                Remote(name: "qwen3.5-4b"),
+            ],
+        ),
+        "qwen3-vl-2b": (
+            capabilities: [Generate, Vision, JsonOutput],
+            licence: "Apache-2.0",
+            artifacts: [
+                Gguf(
+                    model: (path: "qwen3-vl-2b/Qwen3-VL-2B-Instruct-Q4_K_M.gguf"),
+                    mmproj: Some((path: "qwen3-vl-2b/mmproj-Qwen3-VL-2B-Instruct-F16.gguf")),
+                    quant: "Q4_K_M",
+                ),
+            ],
+        ),
+        "smolvlm2-500m": (
+            capabilities: [Generate, Vision, JsonOutput],
+            licence: "Apache-2.0",
+            artifacts: [
+                Gguf(
+                    model: (path: "smolvlm2-500m/SmolVLM2-500M-Video-Instruct-Q8_0.gguf"),
+                    mmproj: Some((path: "smolvlm2-500m/mmproj-SmolVLM2-500M-Video-Instruct-F16.gguf")),
+                    quant: "Q8_0",
+                ),
+            ],
+        ),
+        "qwen3-embedding-0.6b": (
+            capabilities: [Embed],
+            licence: "Apache-2.0",
+            embedding_dimensions: Some(256),
+            artifacts: [
+                Onnx(graphs: {"encoder": (path: "qwen3-embedding-0.6b/model_int8.onnx")}),
+                Gguf(model: (path: "qwen3-embedding-0.6b/Qwen3-Embedding-0.6B-Q8_0.gguf"), quant: "Q8_0"),
+            ],
+        ),
+        "embeddinggemma-300m": (
+            capabilities: [Embed],
+            licence: "Gemma",
+            embedding_dimensions: Some(256),
+            artifacts: [
+                Onnx(graphs: {"encoder": (path: "embeddinggemma-300m/model_quantized.onnx")}),
+                Gguf(model: (path: "embeddinggemma-300m/embeddinggemma-300M-Q8_0.gguf"), quant: "Q8_0"),
+            ],
+        ),
+        "bge-m3": (
+            capabilities: [Embed],
+            licence: "MIT",
+            embedding_dimensions: Some(1024),
+            artifacts: [
+                Onnx(graphs: {"encoder": (path: "bge-m3/model_int8.onnx")}),
+                Gguf(model: (path: "bge-m3/bge-m3-Q8_0.gguf"), quant: "Q8_0"),
+            ],
+        ),
+    },
     tasks: {
-        "ocr_detect": [
-            (name: "pp-ocrv4-det", format: "onnx", sha256: "", licence: "Apache-2.0",
-             input: (shape: [1, 3, 640, 640], dtype: "f32"),
-             providers: ["openvino", "vitisai", "cuda", "cpu"]),
+        RecognizeText: [
+            (model: "pp-ocrv6-det-tiny-rec-small", runtime: OnnxRuntime, device: TensorRt),
+            (model: "pp-ocrv6-det-tiny-rec-small", runtime: OnnxRuntime, device: Cuda),
+            (model: "pp-ocrv6-det-tiny-rec-small", runtime: OnnxRuntime, device: OpenVinoNpu),
+            (model: "pp-ocrv6-det-tiny-rec-small", runtime: OnnxRuntime, device: VitisAi),
+            (model: "pp-ocrv6-det-tiny-rec-small", runtime: OnnxRuntime, device: OpenVinoGpu),
+            (model: "pp-ocrv6-det-tiny-rec-small", runtime: OnnxRuntime, device: MiGraphX),
+            (model: "pp-ocrv6-det-tiny-rec-small", runtime: OnnxRuntime, device: Cpu),
         ],
-        "ocr_recognize": [
-            (name: "pp-ocrv4-rec-en", format: "onnx", sha256: "", licence: "Apache-2.0",
-             input: (shape: [1, 3, 48, 320], dtype: "f32"),
-             providers: ["openvino", "vitisai", "cuda", "cpu"]),
+        EmbedText: [
+            (model: "qwen3-embedding-0.6b", runtime: OnnxRuntime, device: Cuda),
+            (model: "qwen3-embedding-0.6b", runtime: OnnxRuntime, device: OpenVinoNpu),
+            (model: "qwen3-embedding-0.6b", runtime: OnnxRuntime, device: MiGraphX),
+            (model: "qwen3-embedding-0.6b", runtime: LlamaCpp, device: Vulkan),
+            (model: "qwen3-embedding-0.6b", runtime: OnnxRuntime, device: Cpu),
+            (model: "qwen3-embedding-0.6b", runtime: LlamaCpp, device: Cpu),
+            (model: "embeddinggemma-300m", runtime: OnnxRuntime, device: Cpu),
+            (model: "bge-m3", runtime: OnnxRuntime, device: Cpu),
         ],
-        "embed_text": [
-            (name: "bge-small-en-v1.5-int8", format: "onnx", sha256: "", licence: "MIT",
-             input: (shape: [1, 512], dtype: "i64"),
-             providers: ["openvino", "cuda", "cpu"]),
+        SummarizeSegments: [
+            (model: "qwen3.5-4b", runtime: LlamaCpp, device: Cuda, min_tier: High),
+            (model: "qwen3.5-2b", runtime: LlamaCpp, device: Cuda),
+            (model: "qwen3.5-2b", runtime: LlamaCpp, device: Rocm),
+            (model: "qwen3.5-2b", runtime: LlamaCpp, device: Vulkan),
+            (model: "qwen3.5-2b", runtime: LlamaCpp, device: Cpu, on_battery: false),
+            (model: "qwen3.5-4b", runtime: OpenAiCompatible, device: Remote),
         ],
-        "generate": [
-            (name: "qwen2.5-1.5b-instruct-q4_k_m", format: "gguf", sha256: "", licence: "Apache-2.0",
-             input: (shape: [], dtype: "tokens"),
-             providers: ["cuda", "vulkan", "cpu"]),
+        DescribeScreen: [
+            (model: "qwen3.5-4b", runtime: LlamaCpp, device: Cuda, min_tier: High),
+            (model: "qwen3.5-2b", runtime: LlamaCpp, device: Cuda),
+            (model: "qwen3-vl-2b", runtime: LlamaCpp, device: Cuda),
+            (model: "qwen3.5-2b", runtime: LlamaCpp, device: Rocm),
+            (model: "qwen3.5-2b", runtime: LlamaCpp, device: Vulkan),
+            (model: "qwen3-vl-2b", runtime: LlamaCpp, device: Vulkan),
+            (model: "smolvlm2-500m", runtime: LlamaCpp, device: Cpu, on_battery: false),
+            (model: "qwen3.5-4b", runtime: OpenAiCompatible, device: Remote),
         ],
     },
 )

@@ -1,0 +1,109 @@
+use std::time::{Duration, Instant};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BreakerSettings {
+    /// How long a failed (runtime, device) rests before one trial call.
+    pub cooldown: Duration,
+    /// Each failed trial doubles the rest, up to this.
+    pub max_cooldown: Duration,
+}
+
+impl Default for BreakerSettings {
+    fn default() -> Self {
+        Self {
+            cooldown: Duration::from_secs(30),
+            max_cooldown: Duration::from_secs(600),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BreakerState {
+    Closed,
+    Open {
+        until: Instant,
+    },
+    /// One trial call is running.
+    HalfOpen,
+}
+
+/// Stops calls to a (runtime, device) after an error or a watchdog timeout.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CircuitBreaker {
+    state: BreakerState,
+    cooldown: Duration,
+}
+
+impl CircuitBreaker {
+    pub(crate) const fn new(settings: BreakerSettings) -> Self {
+        Self {
+            state: BreakerState::Closed,
+            cooldown: settings.cooldown,
+        }
+    }
+
+    /// Whether a call may go now. After the cooldown, it lets one trial call through.
+    pub(crate) fn try_acquire(&mut self, now: Instant) -> bool {
+        match self.state {
+            BreakerState::Closed => true,
+            BreakerState::Open { until } if now >= until => {
+                self.state = BreakerState::HalfOpen;
+                true
+            }
+            BreakerState::Open { .. } | BreakerState::HalfOpen => false,
+        }
+    }
+
+    pub(crate) const fn record_healthy(&mut self, settings: BreakerSettings) {
+        self.state = BreakerState::Closed;
+        self.cooldown = settings.cooldown;
+    }
+
+    pub(crate) fn record_failure(&mut self, now: Instant, settings: BreakerSettings) {
+        if self.state == BreakerState::HalfOpen {
+            self.cooldown = self.cooldown.saturating_mul(2).min(settings.max_cooldown);
+        }
+        self.state = BreakerState::Open {
+            until: now + self.cooldown,
+        };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SETTINGS: BreakerSettings = BreakerSettings {
+        cooldown: Duration::from_secs(10),
+        max_cooldown: Duration::from_secs(25),
+    };
+
+    #[test]
+    fn opens_on_failure_and_lets_one_trial_through_after_the_cooldown() {
+        let start = Instant::now();
+        let mut breaker = CircuitBreaker::new(SETTINGS);
+        assert!(breaker.try_acquire(start));
+        breaker.record_failure(start, SETTINGS);
+        assert!(!breaker.try_acquire(start + Duration::from_secs(9)));
+        assert!(breaker.try_acquire(start + Duration::from_secs(10)));
+        assert!(!breaker.try_acquire(start + Duration::from_secs(10)));
+        breaker.record_healthy(SETTINGS);
+        assert!(breaker.try_acquire(start + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn a_failed_trial_doubles_the_cooldown_up_to_the_limit() {
+        let start = Instant::now();
+        let mut breaker = CircuitBreaker::new(SETTINGS);
+        breaker.record_failure(start, SETTINGS);
+        let trial = start + Duration::from_secs(10);
+        assert!(breaker.try_acquire(trial));
+        breaker.record_failure(trial, SETTINGS);
+        assert!(!breaker.try_acquire(trial + Duration::from_secs(19)));
+        let second_trial = trial + Duration::from_secs(20);
+        assert!(breaker.try_acquire(second_trial));
+        breaker.record_failure(second_trial, SETTINGS);
+        assert!(!breaker.try_acquire(second_trial + Duration::from_secs(24)));
+        assert!(breaker.try_acquire(second_trial + Duration::from_secs(25)));
+    }
+}

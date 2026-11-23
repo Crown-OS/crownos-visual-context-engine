@@ -1,6 +1,6 @@
 [package]
 name = "context-infer"
-description = "Inference backends and the model registry (later phase)"
+description = "The model layer: task API, capability traits, model registry and router. No inference runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+crownos-config = { workspace = true }
+dirs = { workspace = true }
+ron = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true
