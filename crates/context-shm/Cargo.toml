@@ -1,0 +1,36 @@
+[package]
+name = "context-shm"
+description = "Sealed read-only memfds: how images travel to crown-context-inferd without a copy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rustix = { workspace = true }
+thiserror = { workspace = true }
+
+# The workspace lints, except that unsafe code is denied, not forbidden: the mmap and munmap
+# calls allow it locally.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+todo = "deny"
+unimplemented = "deny"
+redundant_clone = "deny"
+large_enum_variant = "warn"
+needless_pass_by_value = "warn"
+trivially_copy_pass_by_ref = "warn"
+cast_possible_truncation = "warn"
+cast_lossless = "warn"
+missing_const_for_fn = "warn"
+undocumented_unsafe_blocks = "deny"

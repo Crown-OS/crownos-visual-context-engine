@@ -228,6 +228,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "context-shm"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "thiserror",
+]
+
+[[package]]
 name = "context-store"
 version = "0.1.0"
 dependencies = [
