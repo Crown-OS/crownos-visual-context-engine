@@ -126,6 +126,11 @@ impl Generate for RemoteGenerator {
             Output::Json(schema) => Some(schema.as_value()),
             Output::Text => None,
         };
+        if !request.media.is_empty() && !self.model.images_allowed {
+            return Err(InferError::InvalidInput(
+                "images go only to a server on this machine".into(),
+            ));
+        }
         let mut images = image_urls(&request.media)?.into_iter();
         let last_user = request
             .messages

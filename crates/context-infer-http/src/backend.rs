@@ -10,6 +10,7 @@ use crate::credentials::{CredentialSource, EnvironmentApiKey, NoCredentials};
 use crate::embedder::RemoteEmbedder;
 use crate::endpoint::{Authentication, Endpoint};
 use crate::generator::RemoteGenerator;
+use crate::util::loopback::is_loopback;
 
 /// Every remote model behind one endpoint. Probing makes no request.
 #[derive(Debug)]
@@ -17,6 +18,7 @@ pub struct HttpBackend {
     agent: Agent,
     base_url: String,
     credentials: Arc<dyn CredentialSource>,
+    images_allowed: bool,
 }
 
 /// What a remote model needs for each request.
@@ -26,6 +28,8 @@ pub(crate) struct RemoteModel {
     pub(crate) url: String,
     pub(crate) name: String,
     pub(crate) credentials: Arc<dyn CredentialSource>,
+    /// Pixels go only to a server on this machine.
+    pub(crate) images_allowed: bool,
 }
 
 impl HttpBackend {
@@ -58,6 +62,7 @@ impl HttpBackend {
             agent: Agent::new_with_config(config.build()),
             base_url: endpoint.base_url.trim_end_matches('/').to_owned(),
             credentials,
+            images_allowed: is_loopback(&endpoint.base_url),
         })
     }
 
@@ -70,6 +75,7 @@ impl HttpBackend {
             url: format!("{}{path}", self.base_url),
             name: name.clone(),
             credentials: Arc::clone(&self.credentials),
+            images_allowed: self.images_allowed,
         })
     }
 }

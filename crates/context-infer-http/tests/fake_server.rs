@@ -160,3 +160,20 @@ fn embeddings_come_back_in_input_order_with_unit_length() {
     assert_eq!(embeddings.values, [0.6, 0.8, 0.0, 1.0]);
     assert!(server.join().unwrap().contains("\"query: a\""));
 }
+
+#[test]
+fn images_never_go_to_another_machine() {
+    let endpoint = Endpoint {
+        base_url: "https://inference.example.com".into(),
+        authentication: Authentication::None,
+    };
+    let remote = HttpBackend::with_credentials(&endpoint, Arc::new(FixedKey)).unwrap();
+    let pixel = Image::new(1, 1, 3, PixelFormat::Rgb8, vec![0, 0, 0].into()).unwrap();
+    let result = with_spec(Task::SummarizeSegments, |spec| {
+        remote
+            .load_generator(spec)
+            .unwrap()
+            .generate(&request(vec![Media::Image(pixel)]))
+    });
+    assert!(matches!(result, Err(InferError::InvalidInput(_))));
+}
