@@ -175,14 +175,14 @@ Slow subscribers drop events, never stall the service (crownos-ipc semantics [V]
 | Method | Payload | Result |
 |---|---|---|
 | `capabilities()` | — | tiers, runtimes and devices per task, loaded models |
-| `recognize_text(OcrJob)` | memfd: grayscale/RGB crops + boxes, lang hints | lines `{text, bbox, conf}` per crop |
-| `describe_screen(CaptionJob)` | memfd: the capture frame + app name + window title | `ScreenDescription {content_kind, caption, visible_entities[]}` or `SchemaFailure` |
+| `recognize_text(OcrJob)` | memfd: sealed copy of the changed crop (XRGB8888) [V] | lines `{text, bbox, conf}` per crop |
+| `describe_screen(CaptionJob)` | memfd: sealed copy of the whole frame + app name + window title [V] | `ScreenDescription {content_kind, caption, visible_entities[]}` or `SchemaFailure` |
 | `embed_text(batch)` | ≤ 32 texts + purpose (query or document) | int8[256] vectors + space id |
 | `rerank(query, docs)` | ≤ 30 docs | scores |
 | `summarize_segments(batch)` | ≤ 8 segment digests (text only) | one `SegmentSummary` per segment, or `SchemaFailure` |
 | `unload(task?)` | — | — |
 
-The methods are tasks of the task layer ([04 §10.4](04-inference.md#104-model-layer-in-context-infer)); none of them names a model. `generate` is a capability under the tasks, not a method here. relayd serves the same text-only tasks (`embed_text`, `rerank`, `summarize_segments`) through the HTTP backend; it never serves `recognize_text` or `describe_screen`. Every job carries `{job_id, priority: interactive|normal|batch, deadline}`; inferd may reject with `Busy{retry_after}`. Frame jobs are never retried after the frame's 60 s TTL; the frame is then dropped and counted as `frame_dropped_unanalysed`.
+The methods are tasks of the task layer ([04 §10.4](04-inference.md#104-model-layer-in-context-infer)); none of them names a model. `generate` is a capability under the tasks, not a method here. relayd serves the same text-only tasks (`embed_text`, `rerank`, `summarize_segments`) through the HTTP backend; it never serves `recognize_text` or `describe_screen`. Every job carries `{job_id, priority: interactive|normal|batch, deadline}`; inferd may reject with `Busy{retry_after}`. A capture sends its model calls within a 4 s analysis budget and retries a busy call once inside it [V]. A frame that waits in the queue past its 60 s TTL is dropped and counted as `frame_dropped_unanalysed`.
 
 ## 13.6 Changes to existing CrownOS interfaces
 
