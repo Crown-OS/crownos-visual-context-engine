@@ -42,15 +42,17 @@ impl CircuitBreaker {
         }
     }
 
-    /// Whether a call may go now. After the cooldown, it lets one trial call through.
-    pub(crate) fn try_acquire(&mut self, now: Instant) -> bool {
+    /// Whether a call may go now, or how long to wait. After the cooldown, it lets one trial
+    /// call through.
+    pub(crate) fn try_acquire(&mut self, now: Instant) -> Result<(), Duration> {
         match self.state {
-            BreakerState::Closed => true,
+            BreakerState::Closed => Ok(()),
             BreakerState::Open { until } if now >= until => {
                 self.state = BreakerState::HalfOpen;
-                true
+                Ok(())
             }
-            BreakerState::Open { .. } | BreakerState::HalfOpen => false,
+            BreakerState::Open { until } => Err(until - now),
+            BreakerState::HalfOpen => Err(self.cooldown),
         }
     }
 
@@ -82,13 +84,17 @@ mod tests {
     fn opens_on_failure_and_lets_one_trial_through_after_the_cooldown() {
         let start = Instant::now();
         let mut breaker = CircuitBreaker::new(SETTINGS);
-        assert!(breaker.try_acquire(start));
+        assert!(breaker.try_acquire(start).is_ok());
         breaker.record_failure(start, SETTINGS);
-        assert!(!breaker.try_acquire(start + Duration::from_secs(9)));
-        assert!(breaker.try_acquire(start + Duration::from_secs(10)));
-        assert!(!breaker.try_acquire(start + Duration::from_secs(10)));
+        assert!(breaker.try_acquire(start + Duration::from_secs(9)).is_err());
+        assert!(breaker.try_acquire(start + Duration::from_secs(10)).is_ok());
+        assert!(
+            breaker
+                .try_acquire(start + Duration::from_secs(10))
+                .is_err()
+        );
         breaker.record_healthy(SETTINGS);
-        assert!(breaker.try_acquire(start + Duration::from_secs(10)));
+        assert!(breaker.try_acquire(start + Duration::from_secs(10)).is_ok());
     }
 
     #[test]
@@ -97,13 +103,25 @@ mod tests {
         let mut breaker = CircuitBreaker::new(SETTINGS);
         breaker.record_failure(start, SETTINGS);
         let trial = start + Duration::from_secs(10);
-        assert!(breaker.try_acquire(trial));
+        assert!(breaker.try_acquire(trial).is_ok());
         breaker.record_failure(trial, SETTINGS);
-        assert!(!breaker.try_acquire(trial + Duration::from_secs(19)));
+        assert!(
+            breaker
+                .try_acquire(trial + Duration::from_secs(19))
+                .is_err()
+        );
         let second_trial = trial + Duration::from_secs(20);
-        assert!(breaker.try_acquire(second_trial));
+        assert!(breaker.try_acquire(second_trial).is_ok());
         breaker.record_failure(second_trial, SETTINGS);
-        assert!(!breaker.try_acquire(second_trial + Duration::from_secs(24)));
-        assert!(breaker.try_acquire(second_trial + Duration::from_secs(25)));
+        assert!(
+            breaker
+                .try_acquire(second_trial + Duration::from_secs(24))
+                .is_err()
+        );
+        assert!(
+            breaker
+                .try_acquire(second_trial + Duration::from_secs(25))
+                .is_ok()
+        );
     }
 }

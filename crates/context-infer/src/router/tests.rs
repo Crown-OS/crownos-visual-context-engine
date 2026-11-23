@@ -58,6 +58,7 @@ enum Behaviour {
     Answer,
     Fail,
     Busy,
+    OwnTimeout,
     Hang,
 }
 
@@ -69,6 +70,7 @@ struct FakeRuntime {
     behaviours: Behaviours,
     log: Arc<Mutex<Vec<String>>>,
     loads: Arc<Mutex<usize>>,
+    load_time: Mutex<Duration>,
 }
 
 impl FakeRuntime {
@@ -79,6 +81,7 @@ impl FakeRuntime {
             behaviours: Behaviours::default(),
             log: Arc::clone(log),
             loads: Arc::new(Mutex::new(0)),
+            load_time: Mutex::new(Duration::ZERO),
         })
     }
 
@@ -90,6 +93,7 @@ impl FakeRuntime {
     }
 
     fn fake_model(&self, spec: &LoadSpec<'_>) -> FakeModel {
+        thread::sleep(*self.load_time.lock().unwrap());
         *self.loads.lock().unwrap() += 1;
         FakeModel {
             label: format!("{}@{:?}", spec.model_id, spec.device),
@@ -142,6 +146,7 @@ impl FakeModel {
             Behaviour::Busy => Err(InferError::Busy {
                 retry_after: Duration::from_millis(5),
             }),
+            Behaviour::OwnTimeout => Err(InferError::Timeout),
             Behaviour::Hang => {
                 thread::sleep(Duration::from_secs(5));
                 Ok(())
@@ -233,12 +238,12 @@ impl Harness {
             .map(|generation| generation.text)
     }
 
-    fn embed(&self) -> Result<EmbedSpace, InferError> {
+    fn embed(&self, budget: Duration) -> Result<EmbedSpace, InferError> {
         self.router
             .embed(
                 vec!["a".into(), "b".into()],
                 EmbedPurpose::Document,
-                Job::within(Duration::from_secs(2), Priority::Background),
+                Job::within(budget, Priority::Background),
             )
             .map(|embedded| embedded.space)
     }
@@ -330,13 +335,58 @@ fn a_hung_call_times_out_and_the_next_call_avoids_it() {
 }
 
 #[test]
-fn a_hung_call_with_a_known_latency_falls_through_before_the_deadline() {
+fn a_hung_fixed_cost_call_with_a_known_latency_falls_through_before_the_deadline() {
     let harness = Harness::all_devices();
-    assert_eq!(harness.describe(SECOND).unwrap(), "small@Cuda");
-    harness.llama.set("small", Device::Cuda, Behaviour::Hang);
+    harness.embed(SECOND).unwrap();
+    harness.onnx.set("embed-a", Device::Cuda, Behaviour::Hang);
     let started = Instant::now();
-    assert_eq!(harness.describe(3 * SECOND).unwrap(), "small@Vulkan");
+    harness.embed(3 * SECOND).unwrap();
     assert!(started.elapsed() < Duration::from_millis(1500));
+    assert_eq!(
+        harness.calls(),
+        ["embed-a@Cuda", "embed-a@Cuda", "embed-a@Vulkan"]
+    );
+}
+
+#[test]
+fn a_load_slower_than_the_deadline_keeps_the_model_and_the_breaker_closed() {
+    let harness = Harness::all_devices();
+    *harness.llama.load_time.lock().unwrap() = Duration::from_millis(300);
+    assert!(matches!(
+        harness.describe(Duration::from_millis(50)),
+        Err(InferError::Timeout)
+    ));
+    thread::sleep(Duration::from_millis(400));
+    assert_eq!(harness.describe(SECOND).unwrap(), "small@Cuda");
+    assert_eq!(*harness.llama.loads.lock().unwrap(), 1);
+}
+
+#[test]
+fn a_backend_that_stops_at_its_deadline_keeps_the_breaker_closed() {
+    let harness = Harness::all_devices();
+    harness
+        .llama
+        .set("small", Device::Cuda, Behaviour::OwnTimeout);
+    assert_eq!(harness.describe(SECOND).unwrap(), "small@Vulkan");
+    assert_eq!(harness.describe(SECOND).unwrap(), "small@Vulkan");
+    assert_eq!(
+        harness.calls(),
+        ["small@Cuda", "small@Vulkan", "small@Cuda", "small@Vulkan"]
+    );
+}
+
+#[test]
+fn open_breakers_answer_busy_with_a_retry_time() {
+    let harness = Harness::new(&[Device::Cuda], &[], settings());
+    harness.llama.set("small", Device::Cuda, Behaviour::Fail);
+    assert!(matches!(
+        harness.describe(SECOND),
+        Err(InferError::Backend(_))
+    ));
+    assert!(matches!(
+        harness.describe(SECOND),
+        Err(InferError::Busy { retry_after }) if retry_after > Duration::from_secs(20)
+    ));
 }
 
 #[test]
@@ -366,14 +416,14 @@ fn measured_latency_orders_the_devices_of_one_model() {
 
 #[test]
 fn a_candidate_too_slow_for_the_deadline_is_skipped() {
-    let candidates = Registry::from_ron(REGISTRY).unwrap().tasks[&Task::DescribeScreen].clone();
+    let candidates = Registry::from_ron(REGISTRY).unwrap().tasks[&Task::EmbedText].clone();
     let mut benchmarks = BenchmarkCache::default();
-    benchmarks.record(Task::DescribeScreen, &candidates[1], Duration::from_secs(5));
+    benchmarks.record(Task::EmbedText, &candidates[0], Duration::from_secs(5));
     let mut measured = settings();
     measured.benchmarks = benchmarks;
-    let harness = Harness::new(&[Device::Cuda, Device::Vulkan], &[], measured);
-    assert_eq!(harness.describe(SECOND).unwrap(), "small@Vulkan");
-    assert_eq!(harness.calls(), ["small@Vulkan"]);
+    let harness = Harness::new(&[Device::Vulkan], &[Device::Cuda], measured);
+    harness.embed(SECOND).unwrap();
+    assert_eq!(harness.calls(), ["embed-a@Vulkan"]);
 }
 
 #[test]
@@ -387,7 +437,7 @@ fn embedding_never_falls_through_to_another_space() {
         harness.router.embed_space().unwrap().to_string(),
         "embed-a/4"
     );
-    assert!(harness.embed().is_err());
+    assert!(harness.embed(SECOND).is_err());
     assert_eq!(harness.calls(), ["embed-a@Cuda", "embed-a@Vulkan"]);
 }
 
@@ -398,13 +448,13 @@ fn the_space_changes_only_when_its_model_cannot_run() {
         harness.router.embed_space().unwrap().to_string(),
         "embed-b/8"
     );
-    assert_eq!(harness.embed().unwrap().to_string(), "embed-b/8");
+    assert_eq!(harness.embed(SECOND).unwrap().to_string(), "embed-b/8");
 }
 
 #[test]
 fn idle_unload_keeps_the_resident_capabilities() {
     let harness = Harness::all_devices();
-    harness.embed().unwrap();
+    harness.embed(SECOND).unwrap();
     harness.describe(SECOND).unwrap();
     assert_eq!(*harness.onnx.loads.lock().unwrap(), 1);
     assert_eq!(*harness.llama.loads.lock().unwrap(), 1);
@@ -414,7 +464,7 @@ fn idle_unload_keeps_the_resident_capabilities() {
             .unload_idle(Duration::ZERO, &[Capability::Embed]),
         1
     );
-    harness.embed().unwrap();
+    harness.embed(SECOND).unwrap();
     harness.describe(SECOND).unwrap();
     assert_eq!(*harness.onnx.loads.lock().unwrap(), 1);
     assert_eq!(*harness.llama.loads.lock().unwrap(), 2);

@@ -18,7 +18,8 @@ pub enum InferError {
 
 impl InferError {
     /// A failure of the runtime or device, not of the request: the router opens its breaker.
+    /// A backend that stops at the deadline did its job, so its `Timeout` does not count.
     pub(crate) const fn trips_breaker(&self) -> bool {
-        matches!(self, Self::Timeout | Self::Backend(_))
+        matches!(self, Self::Backend(_))
     }
 }

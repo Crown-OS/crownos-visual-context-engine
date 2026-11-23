@@ -104,6 +104,10 @@ impl RouterState {
         );
     }
 
+    pub(crate) fn is_loaded(&self, key: &LoadedKey) -> bool {
+        self.loaded.contains_key(key)
+    }
+
     pub(crate) fn forget(&mut self, key: &LoadedKey) {
         self.loaded.remove(key);
     }

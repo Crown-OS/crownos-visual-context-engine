@@ -77,7 +77,7 @@ pub struct Router {
     models_dir: Arc<Path>,
     breaker_settings: BreakerSettings,
     watchdog_grace: Duration,
-    state: Mutex<RouterState>,
+    state: Arc<Mutex<RouterState>>,
 }
 
 impl std::fmt::Debug for Router {
@@ -121,7 +121,10 @@ impl Router {
             models_dir: Arc::from(settings.models_dir),
             breaker_settings: settings.breaker,
             watchdog_grace: settings.watchdog_grace,
-            state: Mutex::new(RouterState::new(settings.policy, settings.benchmarks)),
+            state: Arc::new(Mutex::new(RouterState::new(
+                settings.policy,
+                settings.benchmarks,
+            ))),
         }
     }
 
@@ -208,7 +211,7 @@ impl Router {
     }
 
     fn lock(&self) -> MutexGuard<'_, RouterState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.state)
     }
 
     /// The candidates to try, best first. The devices of one model are ordered by measured
@@ -273,16 +276,20 @@ impl Router {
             if now >= deadline {
                 return Err(InferError::Timeout);
             }
-            let expected = self.lock().benchmarks.latency(task, &candidate);
+            let expected = task
+                .has_fixed_cost()
+                .then(|| self.lock().benchmarks.latency(task, &candidate))
+                .flatten();
             if expected.is_some_and(|latency| now + latency > deadline) {
                 last_error = InferError::Timeout;
                 continue;
             }
-            if !self
+            let permit = self
                 .lock()
                 .breaker(&candidate, self.breaker_settings)
-                .try_acquire(now)
-            {
+                .try_acquire(now);
+            if let Err(retry_after) = permit {
+                last_error = InferError::Busy { retry_after };
                 continue;
             }
             let call = Arc::clone(&call);
@@ -299,7 +306,9 @@ impl Router {
         Err(last_error)
     }
 
-    /// One call on one candidate: load it when needed, then call it under the watchdog.
+    /// One call on one candidate under the watchdog. A model that loads after the wait ends
+    /// still goes in the cache. A wait that ends in the load does not open the breaker; a wait
+    /// that ends in the call does.
     fn attempt<C, R>(
         &self,
         task: Task,
@@ -315,47 +324,67 @@ impl Router {
         let key = LoadedKey::new(C::CAPABILITY, candidate);
         let now = Instant::now();
         let cached: Option<Arc<C>> = self.lock().loaded(&key, now);
-        let call_deadline = match (&cached, expected) {
-            (Some(_), Some(latency)) => {
-                deadline.min(now + (latency * HANG_FACTOR).max(MIN_HANG_TIME))
-            }
+        let was_loaded = cached.is_some();
+        let wait_until = match (was_loaded, expected) {
+            (true, Some(latency)) => deadline.min(now + (latency * HANG_FACTOR).max(MIN_HANG_TIME)),
             _ => deadline,
-        };
+        } + self.watchdog_grace;
         let backend = self.backends.get(&candidate.runtime).cloned();
         let registry = Arc::clone(&self.registry);
         let models_dir = Arc::clone(&self.models_dir);
+        let state = Arc::clone(&self.state);
         let owned_candidate = candidate.clone();
-        let outcome = run_until(call_deadline + self.watchdog_grace, move || {
+        let worker_key = key.clone();
+        let outcome = run_until(wait_until, move || {
             let model = match cached {
                 Some(model) => model,
                 None => {
-                    let backend = backend.ok_or_else(|| {
-                        InferError::Unavailable(format!("{:?}", owned_candidate.runtime).into())
-                    })?;
-                    let spec = LoadSpec::new(&registry, &owned_candidate, &models_dir)?;
-                    C::load(backend.as_ref(), &spec)?
+                    let model =
+                        load::<C>(backend.as_deref(), &registry, &owned_candidate, &models_dir)?;
+                    lock(&state).store(worker_key, Arc::clone(&model), Instant::now());
+                    model
                 }
             };
-            let started = Instant::now();
-            let result = call(&model);
-            Ok((model, result, started.elapsed()))
-        });
-        let (model, result) = match outcome.and_then(|finished| finished) {
-            Ok((model, result, elapsed)) => {
-                if result.is_ok() {
-                    self.lock().benchmarks.record(task, candidate, elapsed);
-                }
-                (Some(model), result)
+            if Instant::now() >= deadline {
+                return Err(InferError::Timeout);
             }
-            Err(error) => (None, Err(error)),
+            let started = Instant::now();
+            call(&model).map(|value| (value, started.elapsed()))
+        });
+        let (result, failed) = match outcome {
+            Err(InferError::Timeout) => {
+                let hung_in_the_call = was_loaded || self.lock().is_loaded(&key);
+                (Err(InferError::Timeout), hung_in_the_call)
+            }
+            Err(error) => (Err(error), true),
+            Ok(result) => {
+                let failed = result.as_ref().is_err_and(InferError::trips_breaker);
+                (result, failed)
+            }
         };
-        let failed = result.as_ref().is_err_and(InferError::trips_breaker);
         let mut state = self.lock();
-        match model {
-            Some(model) if !failed => state.store(key, model, Instant::now()),
-            _ => state.forget(&key),
+        if let Ok((_, elapsed)) = &result {
+            state.benchmarks.record(task, candidate, *elapsed);
+        }
+        if failed {
+            state.forget(&key);
         }
         state.record_verdict(candidate, failed, Instant::now(), self.breaker_settings);
-        result
+        result.map(|(value, _)| value)
     }
+}
+
+fn lock(state: &Mutex<RouterState>) -> MutexGuard<'_, RouterState> {
+    state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn load<C: Loadable + ?Sized>(
+    backend: Option<&dyn RuntimeBackend>,
+    registry: &Registry,
+    candidate: &Candidate,
+    models_dir: &Path,
+) -> Result<Arc<C>, InferError> {
+    let backend = backend
+        .ok_or_else(|| InferError::Unavailable(format!("{:?}", candidate.runtime).into()))?;
+    C::load(backend, &LoadSpec::new(registry, candidate, models_dir)?)
 }

@@ -14,6 +14,12 @@ pub enum Task {
 }
 
 impl Task {
+    /// Whether a call costs about the same each time, so a measured latency predicts the next
+    /// one. The cost of generation grows with the requested tokens.
+    pub const fn has_fixed_cost(self) -> bool {
+        matches!(self, Self::RecognizeText | Self::EmbedText | Self::Rerank)
+    }
+
     pub const fn required_capabilities(self) -> &'static [Capability] {
         match self {
             Self::RecognizeText => &[Capability::Ocr],
