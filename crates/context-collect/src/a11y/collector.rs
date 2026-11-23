@@ -170,6 +170,7 @@ impl<'h, H: AccessibilityHost> Collector<'h, H> {
             .await;
         match application {
             Some(application) => {
+                self.readings.forget_without_application(&record.ident);
                 self.activated_frames.remove(&application);
                 self.schedule
                     .wake(&application, Wake::FocusChange, Instant::now());
@@ -177,8 +178,7 @@ impl<'h, H: AccessibilityHost> Collector<'h, H> {
             }
             None => {
                 self.focused_application = None;
-                self.readings
-                    .record(&record.ident, AccessibleText::Unread, Timestamp::now());
+                self.readings.record_without_application(&record);
             }
         }
     }
@@ -193,24 +193,27 @@ impl<'h, H: AccessibilityHost> Collector<'h, H> {
                 .filter(|focused| focused.ident == window)
                 .cloned()
         });
-        let application = match (&self.focused_application, focused) {
-            (Some(application), Some(_)) => Some(application.clone()),
-            (None, Some(record)) => {
+        let Some(record) = focused else {
+            self.readings
+                .record(&window, AccessibleText::Unread, Timestamp::now());
+            return;
+        };
+        let application = match &self.focused_application {
+            Some(application) => Some(application.clone()),
+            None => {
                 self.applications
                     .find_for(&self.bus, &self.health, &mut self.resolver, &record)
                     .await
             }
-            (_, None) => None,
         };
         match application {
             Some(application) => {
+                self.readings.forget_without_application(&record.ident);
                 self.schedule
                     .wake(&application, Wake::CaptureRequest, Instant::now());
                 self.focused_application = Some(application);
             }
-            None => self
-                .readings
-                .record(&window, AccessibleText::Unread, Timestamp::now()),
+            None => self.readings.record_without_application(&record),
         }
     }
 

@@ -1,7 +1,7 @@
 //! The capture pipeline as the daemon runs it: which capture may happen, and where its text goes.
 
 use std::sync::Arc;
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{Sender, SyncSender};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -27,6 +27,10 @@ const IDENTITY_EXPOSURE_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long the compositor refuses captures of a window that showed a secret.
 pub(crate) const SECRET_FLAG_DURATION: Duration = Duration::from_secs(10 * 60);
 
+/// A capture whose frame was dropped for a reading that gave no text. The pipeline takes it
+/// once more, with OCR.
+pub(crate) type MissedReading = (Trigger, WindowIdent);
+
 /// Starts capture and analysis. Outcomes come back as observations through `outlet`, so they
 /// pass the same policy gate as everything else. Windows with a recent a11y reading in
 /// `readings` are not read by OCR.
@@ -36,8 +40,12 @@ pub(crate) fn spawn(
     outlet: SyncSender<Observation>,
     inferd: InferdClient,
     readings: RecentReadings,
+    missed_readings: Sender<MissedReading>,
 ) -> Result<Arc<CaptureService>> {
     let deliver = move |outcome: CaptureOutcome| {
+        if outcome.reading_missed {
+            let _ = missed_readings.send((outcome.target.trigger, outcome.target.window.clone()));
+        }
         for observation in outcome.observations() {
             if outlet.send(observation).is_err() {
                 return;
@@ -104,5 +112,6 @@ pub(crate) fn target(
         app_key: app.app_key,
         app_name: app.name,
         title: record.title.clone(),
+        ocr_without_reading: false,
     })
 }

@@ -7,7 +7,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use context_capture::{CaptureHold, CaptureScheduler, CaptureService};
+use context_capture::{CaptureHold, CaptureScheduler, CaptureService, CaptureTarget};
 use context_collect::CompositorLink;
 use context_collect::a11y::RecentReadings;
 use context_collect::apps::AppResolver;
@@ -70,11 +70,13 @@ impl Pipeline {
     }
 }
 
-/// What the pipeline captures with: the capture service, and the a11y readings it asks for
-/// when it requests a capture, so a reading is often there by the time the frame comes.
+/// What the pipeline captures with: the capture service, the a11y readings it asks for when it
+/// requests a capture, so a reading is often there by the time the frame comes, and the
+/// captures whose reading did not come.
 pub(crate) struct Capturing {
     pub(crate) service: Arc<CaptureService>,
     pub(crate) readings: RecentReadings,
+    pub(crate) missed_readings: Receiver<capture::MissedReading>,
 }
 
 pub(crate) fn spawn(
@@ -138,6 +140,7 @@ impl Worker {
                 Err(RecvTimeoutError::Timeout) => self.idle(),
                 Err(RecvTimeoutError::Disconnected) => break,
             }
+            self.retry_missed_readings();
             self.capture_when_due();
             self.flush_context(false);
         }
@@ -291,10 +294,37 @@ impl Worker {
         let target = capture::target(&shared, &self.link, &self.policy, trigger, window.as_ref());
         match target {
             Some(target) => {
-                capturing.readings.request(&target.window);
+                if let Some(record) = shared.engine.window(&target.window) {
+                    capturing.readings.request(record);
+                }
                 capturing.service.capture(target);
             }
             None => tracing::debug!(?trigger, "a capture was due but a gate refused it"),
+        }
+    }
+
+    /// Captures each window whose reading did not come once more, with OCR, when every gate
+    /// still passes. That capture never asks for another one.
+    fn retry_missed_readings(&self) {
+        let Some(capturing) = &self.capturing else {
+            return;
+        };
+        let missed: Vec<capture::MissedReading> = capturing.missed_readings.try_iter().collect();
+        if missed.is_empty() {
+            return;
+        }
+        let Ok(shared) = self.shared.lock() else {
+            return;
+        };
+        for (trigger, window) in missed {
+            if let Some(target) =
+                capture::target(&shared, &self.link, &self.policy, trigger, Some(&window))
+            {
+                capturing.service.capture(CaptureTarget {
+                    ocr_without_reading: true,
+                    ..target
+                });
+            }
         }
     }
 

@@ -232,6 +232,9 @@ sequenceDiagram
       F->>F: drop the frame unread, no frame record
     else no reading yet
       F->>F: zero the frame first, then wait ≤ 300 ms (a hold stops the wait); no OCR without it
+      opt the reading gives no text
+        F-->>B: capture the window once more, with OCR when no reading is there
+      end
     else
       F->>F: hash 32px tiles inside damage, mask volatile regions
       F->>F: copy regions into memfds sealed with F_SEAL_WRITE

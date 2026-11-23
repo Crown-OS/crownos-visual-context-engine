@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use context_core::{Micros, Timestamp, WindowIdent};
+use context_core::{Micros, Timestamp, WindowIdent, WindowRecord};
 use tokio::sync::Notify;
 
 /// Past this many windows, readings older than [`KEPT_FOR`] are pruned.
@@ -28,6 +28,28 @@ struct Readings {
     by_window: HashMap<WindowIdent, (Timestamp, AccessibleText)>,
     requested: Option<WindowIdent>,
     reader_connected: bool,
+    without_application: HashMap<WindowIdent, WindowOwner>,
+}
+
+/// The app and process that showed a window when the collector found no a11y application
+/// for it.
+#[derive(Debug, PartialEq, Eq)]
+struct WindowOwner {
+    app_id: String,
+    pid: i32,
+}
+
+impl WindowOwner {
+    fn of(window: &WindowRecord) -> Self {
+        Self {
+            app_id: window.app_id.clone(),
+            pid: window.pid,
+        }
+    }
+
+    fn owns(&self, window: &WindowRecord) -> bool {
+        self.app_id == window.app_id && self.pid == window.pid
+    }
 }
 
 impl Readings {
@@ -67,6 +89,28 @@ impl RecentReadings {
         self.shared.recorded.notify_all();
     }
 
+    /// Keeps that `window` has no a11y application while its app and process stay the same,
+    /// and records it as `Unread` now.
+    pub(crate) fn record_without_application(&self, window: &WindowRecord) {
+        if let Ok(mut readings) = self.shared.readings.lock() {
+            if readings.without_application.len() >= KEPT_WINDOWS {
+                readings.without_application.clear();
+            }
+            readings
+                .without_application
+                .insert(window.ident.clone(), WindowOwner::of(window));
+            readings.keep(&window.ident, AccessibleText::Unread, Timestamp::now());
+        }
+        self.shared.recorded.notify_all();
+    }
+
+    /// The collector found an a11y application for `window`.
+    pub(crate) fn forget_without_application(&self, window: &WindowIdent) {
+        if let Ok(mut readings) = self.shared.readings.lock() {
+            readings.without_application.remove(window);
+        }
+    }
+
     /// Marks the collector connected to the a11y bus until the returned value is dropped.
     pub(crate) fn connect_reader(&self) -> ConnectedReader {
         self.set_reader_connected(true);
@@ -90,18 +134,23 @@ impl RecentReadings {
         fresh(&*self.shared.readings.lock().ok()?, window, since)
     }
 
-    /// Asks the collector to read `window` now. With no collector on the a11y bus, the window
-    /// is `Unread` at once, so OCR covers it.
-    pub fn request(&self, window: &WindowIdent) {
+    /// Asks the collector to read `window` now. The window is `Unread` at once, so OCR covers
+    /// it, when no collector is on the a11y bus or when its app is known to have no a11y
+    /// application.
+    pub fn request(&self, window: &WindowRecord) {
         let Ok(mut readings) = self.shared.readings.lock() else {
             return;
         };
-        if readings.reader_connected {
-            readings.requested = Some(window.clone());
+        let known_unreadable = readings
+            .without_application
+            .get(&window.ident)
+            .is_some_and(|owner| owner.owns(window));
+        if readings.reader_connected && !known_unreadable {
+            readings.requested = Some(window.ident.clone());
             drop(readings);
             self.shared.requested.notify_one();
         } else {
-            readings.keep(window, AccessibleText::Unread, Timestamp::now());
+            readings.keep(&window.ident, AccessibleText::Unread, Timestamp::now());
             drop(readings);
             self.shared.recorded.notify_all();
         }
@@ -164,6 +213,15 @@ mod tests {
         WindowIdent(name.into())
     }
 
+    fn record(name: &str, pid: i32) -> WindowRecord {
+        WindowRecord {
+            ident: window(name),
+            app_id: "org.example.Plain".to_owned(),
+            pid,
+            ..WindowRecord::default()
+        }
+    }
+
     #[test]
     fn only_a_reading_taken_after_the_request_counts() {
         let readings = RecentReadings::default();
@@ -182,21 +240,40 @@ mod tests {
     fn a_request_without_a_connected_reader_is_unread_at_once() {
         let readings = RecentReadings::default();
         let since = Timestamp::now();
-        readings.request(&window("a"));
+        readings.request(&record("a", 1));
         assert_eq!(
             readings.latest(&window("a"), since),
             Some(AccessibleText::Unread)
         );
         let reader = readings.connect_reader();
         let later = Timestamp(Timestamp::now().0 + 1);
-        readings.request(&window("a"));
+        readings.request(&record("a", 1));
         assert_eq!(readings.latest(&window("a"), later), None);
         drop(reader);
-        readings.request(&window("b"));
+        readings.request(&record("b", 1));
         assert_eq!(
             readings.latest(&window("b"), since),
             Some(AccessibleText::Unread)
         );
+    }
+
+    #[test]
+    fn a_window_known_to_have_no_application_is_unread_at_once_until_its_process_changes() {
+        let readings = RecentReadings::default();
+        let _reader = readings.connect_reader();
+        readings.record_without_application(&record("a", 1));
+        let since = Timestamp(Timestamp::now().0 + 1);
+        readings.request(&record("a", 1));
+        assert_eq!(
+            readings.latest(&window("a"), since),
+            Some(AccessibleText::Unread)
+        );
+        let later = Timestamp(Timestamp::now().0 + 1);
+        readings.request(&record("a", 2));
+        assert_eq!(readings.latest(&window("a"), later), None);
+        readings.forget_without_application(&window("a"));
+        readings.request(&record("a", 1));
+        assert_eq!(readings.latest(&window("a"), later), None);
     }
 
     #[test]

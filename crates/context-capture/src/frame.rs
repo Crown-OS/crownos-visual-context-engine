@@ -16,6 +16,9 @@ pub struct CaptureTarget {
     pub app_key: String,
     pub app_name: String,
     pub title: String,
+    /// A second capture after a reading that did not come: with no reading there, OCR reads
+    /// the window instead of a wait.
+    pub ocr_without_reading: bool,
 }
 
 /// One captured frame: `wl_shm` `XRGB8888`, which is B, G, R, X in memory. The pixels exist only

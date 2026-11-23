@@ -61,6 +61,9 @@ pub struct CaptureOutcome {
     /// capture is reported. The collector that saw the field flagged the window.
     pub withheld: bool,
     pub cancelled: bool,
+    /// The frame was dropped for a reading that then gave no text: nothing read the window.
+    /// The daemon takes one more capture with [`CaptureTarget::ocr_without_reading`].
+    pub reading_missed: bool,
 }
 
 impl CaptureOutcome {
@@ -167,8 +170,10 @@ impl FrameAnalyzer {
         let structured = match self.structured_text.window_text(&target) {
             StructuredReading::Text(lines) => Some(lines),
             StructuredReading::Sensitive => return self.withhold(frame),
-            StructuredReading::Pending => return self.read_without_pixels(frame, conditions),
-            StructuredReading::Unavailable => None,
+            StructuredReading::Pending if !target.ocr_without_reading => {
+                return self.read_without_pixels(frame, conditions);
+            }
+            StructuredReading::Pending | StructuredReading::Unavailable => None,
         };
         let first_capture = !self.tile_hashes.contains(window);
         let mut changed = self
@@ -249,6 +254,7 @@ impl FrameAnalyzer {
             secret_found: false,
             withheld: false,
             cancelled: cancelled(),
+            reading_missed: false,
         };
         if contains_secret(&outcome) {
             self.line_caches.forget_window(window);
@@ -296,7 +302,9 @@ impl FrameAnalyzer {
             secret_found: false,
             withheld: false,
             cancelled: conditions.cancel.is_cancelled(),
+            reading_missed: false,
         };
+        outcome.reading_missed = outcome.text.is_none() && !outcome.cancelled;
         if contains_secret(&outcome) {
             outcome.text = None;
             outcome.secret_found = true;
@@ -341,6 +349,7 @@ const fn withheld(
         secret_found: false,
         withheld: true,
         cancelled: false,
+        reading_missed: false,
     }
 }
 

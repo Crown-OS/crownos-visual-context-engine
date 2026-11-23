@@ -102,6 +102,7 @@ fn captured_frame(ident: &WindowIdent, pixels: &[u8], width: u32, height: u32) -
         app_key: "org.crownos.test".to_owned(),
         app_name: "Test".to_owned(),
         title: "Noise".to_owned(),
+        ocr_without_reading: false,
     };
     CapturedFrame::new(target, width, height, width as usize * 4, vec![], memory).unwrap()
 }

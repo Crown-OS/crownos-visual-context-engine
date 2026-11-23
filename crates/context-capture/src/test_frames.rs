@@ -17,6 +17,7 @@ pub(crate) fn target(window: &str) -> CaptureTarget {
         app_key: "test.app".to_owned(),
         app_name: "Test".to_owned(),
         title: "Test window".to_owned(),
+        ocr_without_reading: false,
     }
 }
 
