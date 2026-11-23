@@ -41,7 +41,22 @@ pub struct ModelEntry {
     /// Output size of an embedding model, after any Matryoshka truncation.
     #[serde(default)]
     pub embedding_dimensions: Option<u32>,
+    /// How an embedding graph without a pooled output turns token states into one vector.
+    #[serde(default)]
+    pub pooling: Option<Pooling>,
+    /// Put before each query or document text, as the model card asks.
+    #[serde(default)]
+    pub query_prefix: String,
+    #[serde(default)]
+    pub document_prefix: String,
     pub artifacts: Vec<Artifact>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Pooling {
+    Cls,
+    Mean,
+    LastToken,
 }
 
 /// The files one runtime loads. Paths are relative to the models directory.
@@ -58,6 +73,9 @@ pub enum Artifact {
         graphs: BTreeMap<String, OnnxGraph>,
         #[serde(default)]
         files: BTreeMap<String, ModelFile>,
+        /// For example `fp32` or `int8`.
+        #[serde(default)]
+        quant: String,
     },
     Remote {
         name: String,
@@ -84,6 +102,7 @@ pub struct OnnxGraph {
 
 /// One way to run a task: a model on a runtime and device, with the conditions it needs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Candidate {
     pub model: String,
     pub runtime: Runtime,
@@ -117,6 +136,13 @@ impl Artifact {
             Self::Remote { .. } => Runtime::OpenAiCompatible,
         }
     }
+
+    pub fn quantization(&self) -> &str {
+        match self {
+            Self::Gguf { quant, .. } | Self::Onnx { quant, .. } => quant,
+            Self::Remote { .. } => "remote",
+        }
+    }
 }
 
 impl ModelEntry {
@@ -136,11 +162,16 @@ impl Registry {
         self.tasks.get(&task).map_or(&[], Vec::as_slice)
     }
 
-    pub fn embed_space(&self, model_id: &str) -> Option<EmbedSpace> {
-        let dimensions = self.models.get(model_id)?.embedding_dimensions?;
+    pub fn embed_space(&self, candidate: &Candidate) -> Option<EmbedSpace> {
+        let model = self.models.get(&candidate.model)?;
         Some(EmbedSpace {
-            model: model_id.to_owned(),
-            dimensions,
+            model: candidate.model.clone(),
+            runtime: candidate.runtime,
+            quantization: model
+                .artifact_for(candidate.runtime)?
+                .quantization()
+                .to_owned(),
+            dimensions: model.embedding_dimensions?,
         })
     }
 }

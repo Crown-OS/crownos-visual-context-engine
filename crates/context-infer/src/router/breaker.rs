@@ -17,6 +17,16 @@ impl Default for BreakerSettings {
     }
 }
 
+/// What one call says about the health of its (runtime, device).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Verdict {
+    Healthy,
+    /// A backend error, a panic or a hung call.
+    Failed,
+    /// Busy, a timeout that the backend or a load caused, or an unavailable model.
+    Inconclusive,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BreakerState {
     Closed,
@@ -56,18 +66,27 @@ impl CircuitBreaker {
         }
     }
 
-    pub(crate) const fn record_healthy(&mut self, settings: BreakerSettings) {
-        self.state = BreakerState::Closed;
-        self.cooldown = settings.cooldown;
-    }
-
-    pub(crate) fn record_failure(&mut self, now: Instant, settings: BreakerSettings) {
-        if self.state == BreakerState::HalfOpen {
-            self.cooldown = self.cooldown.saturating_mul(2).min(settings.max_cooldown);
+    pub(crate) fn record(&mut self, verdict: Verdict, now: Instant, settings: BreakerSettings) {
+        match (verdict, self.state) {
+            (Verdict::Healthy, _) => {
+                self.state = BreakerState::Closed;
+                self.cooldown = settings.cooldown;
+            }
+            (Verdict::Failed, state) => {
+                if state == BreakerState::HalfOpen {
+                    self.cooldown = self.cooldown.saturating_mul(2).min(settings.max_cooldown);
+                }
+                self.state = BreakerState::Open {
+                    until: now + self.cooldown,
+                };
+            }
+            (Verdict::Inconclusive, BreakerState::HalfOpen) => {
+                self.state = BreakerState::Open {
+                    until: now + self.cooldown,
+                };
+            }
+            (Verdict::Inconclusive, _) => {}
         }
-        self.state = BreakerState::Open {
-            until: now + self.cooldown,
-        };
     }
 }
 
@@ -85,7 +104,7 @@ mod tests {
         let start = Instant::now();
         let mut breaker = CircuitBreaker::new(SETTINGS);
         assert!(breaker.try_acquire(start).is_ok());
-        breaker.record_failure(start, SETTINGS);
+        breaker.record(Verdict::Failed, start, SETTINGS);
         assert!(breaker.try_acquire(start + Duration::from_secs(9)).is_err());
         assert!(breaker.try_acquire(start + Duration::from_secs(10)).is_ok());
         assert!(
@@ -93,7 +112,7 @@ mod tests {
                 .try_acquire(start + Duration::from_secs(10))
                 .is_err()
         );
-        breaker.record_healthy(SETTINGS);
+        breaker.record(Verdict::Healthy, start, SETTINGS);
         assert!(breaker.try_acquire(start + Duration::from_secs(10)).is_ok());
     }
 
@@ -101,10 +120,10 @@ mod tests {
     fn a_failed_trial_doubles_the_cooldown_up_to_the_limit() {
         let start = Instant::now();
         let mut breaker = CircuitBreaker::new(SETTINGS);
-        breaker.record_failure(start, SETTINGS);
+        breaker.record(Verdict::Failed, start, SETTINGS);
         let trial = start + Duration::from_secs(10);
         assert!(breaker.try_acquire(trial).is_ok());
-        breaker.record_failure(trial, SETTINGS);
+        breaker.record(Verdict::Failed, trial, SETTINGS);
         assert!(
             breaker
                 .try_acquire(trial + Duration::from_secs(19))
@@ -112,7 +131,7 @@ mod tests {
         );
         let second_trial = trial + Duration::from_secs(20);
         assert!(breaker.try_acquire(second_trial).is_ok());
-        breaker.record_failure(second_trial, SETTINGS);
+        breaker.record(Verdict::Failed, second_trial, SETTINGS);
         assert!(
             breaker
                 .try_acquire(second_trial + Duration::from_secs(24))
@@ -123,5 +142,19 @@ mod tests {
                 .try_acquire(second_trial + Duration::from_secs(25))
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn an_inconclusive_trial_reopens_with_the_same_cooldown() {
+        let start = Instant::now();
+        let mut breaker = CircuitBreaker::new(SETTINGS);
+        breaker.record(Verdict::Inconclusive, start, SETTINGS);
+        assert!(breaker.try_acquire(start).is_ok());
+        breaker.record(Verdict::Failed, start, SETTINGS);
+        let trial = start + Duration::from_secs(10);
+        assert!(breaker.try_acquire(trial).is_ok());
+        breaker.record(Verdict::Inconclusive, trial, SETTINGS);
+        assert!(breaker.try_acquire(trial + Duration::from_secs(9)).is_err());
+        assert!(breaker.try_acquire(trial + Duration::from_secs(10)).is_ok());
     }
 }

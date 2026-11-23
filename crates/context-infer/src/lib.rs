@@ -19,7 +19,7 @@ pub use capability::{
 };
 pub use crownos_config::system::ai::{Device, Runtime};
 pub use error::InferError;
-pub use media::{ImageLayoutError, Media, RgbImage, SharedBytes};
+pub use media::{Image, ImageLayoutError, Media, PixelFormat, SharedBytes};
 pub use registry::Registry;
 pub use request::{GenRequest, Generation, Job, Message, Output, Priority, Role, Sampling};
 pub use router::{

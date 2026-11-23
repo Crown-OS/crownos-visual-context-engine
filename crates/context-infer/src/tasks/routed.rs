@@ -9,7 +9,7 @@ use super::summarize::{
 };
 use crate::capability::{EmbedPurpose, EmbedSpace, TextLine};
 use crate::error::InferError;
-use crate::media::{Media, RgbImage};
+use crate::media::{Image, Media};
 use crate::request::{GenRequest, Job, Message, Output, Sampling};
 use crate::router::{EmbeddedTexts, Router};
 use crate::task::Task;
@@ -73,7 +73,7 @@ impl ContextTasks for RoutedTasks {
 
     fn describe_screen(
         &self,
-        screen: &RgbImage,
+        screen: &Image,
         app_name: &str,
         window_title: &str,
         job: Job,
@@ -83,7 +83,7 @@ impl ContextTasks for RoutedTasks {
                 Message::system(DESCRIBE_SCREEN_SYSTEM_PROMPT),
                 Message::user(describe_screen_prompt(app_name, window_title)),
             ],
-            media: vec![Media::Rgb8(screen.clone())],
+            media: vec![Media::Image(screen.clone())],
             output: Output::json_for::<ScreenDescription>(),
             sampling: Sampling::default(),
             max_tokens: DESCRIPTION_TOKENS,
@@ -92,7 +92,7 @@ impl ContextTasks for RoutedTasks {
         self.generate_json(Task::DescribeScreen, request)
     }
 
-    fn recognize_text(&self, image: &RgbImage, job: Job) -> Result<Vec<TextLine>, InferError> {
+    fn recognize_text(&self, image: &Image, job: Job) -> Result<Vec<TextLine>, InferError> {
         self.router.recognize_text(image.clone(), job)
     }
 

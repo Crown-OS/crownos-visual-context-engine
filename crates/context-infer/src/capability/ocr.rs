@@ -1,5 +1,5 @@
 use crate::error::InferError;
-use crate::media::RgbImage;
+use crate::media::Image;
 
 /// An axis-aligned box in image pixels.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -19,5 +19,5 @@ pub struct TextLine {
 
 pub trait Ocr: Send + Sync {
     /// The text lines in reading order.
-    fn recognize(&self, image: &RgbImage) -> Result<Vec<TextLine>, InferError>;
+    fn recognize(&self, image: &Image) -> Result<Vec<TextLine>, InferError>;
 }

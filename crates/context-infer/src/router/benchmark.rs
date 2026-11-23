@@ -25,13 +25,13 @@ pub fn benchmark_fingerprint(backends: &[Arc<dyn RuntimeBackend>]) -> String {
     parts.join(";")
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Measurement {
     task: Task,
     model: String,
     runtime: Runtime,
     device: Device,
-    micros: u64,
+    nanos_per_unit: f64,
 }
 
 impl Measurement {
@@ -43,9 +43,10 @@ impl Measurement {
     }
 }
 
-/// Call latency per (task, model, runtime, device), valid for one runtime and driver
-/// [`fingerprint`](Self::fingerprint).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Call latency per unit of work for each (task, model, runtime, device), valid for one
+/// runtime and driver [`fingerprint`](Self::fingerprint). A unit is a pixel for OCR, a byte of
+/// text for embedding and reranking, a sample for transcription and a token for generation.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BenchmarkCache {
     pub fingerprint: String,
     measurements: Vec<Measurement>,
@@ -75,30 +76,36 @@ impl BenchmarkCache {
         std::fs::rename(partial, path)
     }
 
-    pub fn latency(&self, task: Task, candidate: &Candidate) -> Option<Duration> {
+    pub fn nanos_per_unit(&self, task: Task, candidate: &Candidate) -> Option<f64> {
         self.measurements
             .iter()
             .find(|measurement| measurement.is_for(task, candidate))
-            .map(|measurement| Duration::from_micros(measurement.micros))
+            .map(|measurement| measurement.nanos_per_unit)
+    }
+
+    /// The expected time of a call with `units` of work.
+    pub fn latency(&self, task: Task, candidate: &Candidate, units: u64) -> Option<Duration> {
+        let nanos = self.nanos_per_unit(task, candidate)? * units.max(1) as f64;
+        Duration::try_from_secs_f64(nanos / 1e9).ok()
     }
 
     /// Adds a sample. Older samples keep three quarters of the weight.
-    pub fn record(&mut self, task: Task, candidate: &Candidate, elapsed: Duration) {
-        let sample = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+    pub fn record(&mut self, task: Task, candidate: &Candidate, elapsed: Duration, units: u64) {
+        let sample = elapsed.as_nanos() as f64 / units.max(1) as f64;
         match self
             .measurements
             .iter_mut()
             .find(|measurement| measurement.is_for(task, candidate))
         {
             Some(measurement) => {
-                measurement.micros = measurement.micros / 4 * 3 + sample / 4;
+                measurement.nanos_per_unit = measurement.nanos_per_unit * 0.75 + sample * 0.25;
             }
             None => self.measurements.push(Measurement {
                 task,
                 model: candidate.model.clone(),
                 runtime: candidate.runtime,
                 device: candidate.device,
-                micros: sample,
+                nanos_per_unit: sample,
             }),
         }
     }
@@ -125,26 +132,41 @@ mod tests {
             .join(format!("context-infer-bench-{}", std::process::id()))
             .join("backends.ron");
         let mut cache = BenchmarkCache::load(&path, "ort=1.23");
-        cache.record(Task::RecognizeText, &candidate(), Duration::from_millis(8));
+        cache.record(
+            Task::RecognizeText,
+            &candidate(),
+            Duration::from_millis(8),
+            1000,
+        );
         cache.save(&path).unwrap();
 
         let same = BenchmarkCache::load(&path, "ort=1.23");
         assert_eq!(
-            same.latency(Task::RecognizeText, &candidate()),
-            Some(Duration::from_millis(8))
+            same.latency(Task::RecognizeText, &candidate(), 2000),
+            Some(Duration::from_millis(16))
         );
         let upgraded = BenchmarkCache::load(&path, "ort=1.24");
-        assert_eq!(upgraded.latency(Task::RecognizeText, &candidate()), None);
+        assert_eq!(upgraded.latency(Task::RecognizeText, &candidate(), 1), None);
         assert_eq!(upgraded.fingerprint, "ort=1.24");
     }
 
     #[test]
     fn new_samples_move_the_average_by_a_quarter() {
         let mut cache = BenchmarkCache::default();
-        cache.record(Task::RecognizeText, &candidate(), Duration::from_millis(8));
-        cache.record(Task::RecognizeText, &candidate(), Duration::from_millis(16));
+        cache.record(
+            Task::RecognizeText,
+            &candidate(),
+            Duration::from_millis(8),
+            1,
+        );
+        cache.record(
+            Task::RecognizeText,
+            &candidate(),
+            Duration::from_millis(16),
+            1,
+        );
         assert_eq!(
-            cache.latency(Task::RecognizeText, &candidate()),
+            cache.latency(Task::RecognizeText, &candidate(), 1),
             Some(Duration::from_millis(10))
         );
     }

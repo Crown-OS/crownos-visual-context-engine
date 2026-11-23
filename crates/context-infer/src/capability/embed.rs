@@ -1,20 +1,28 @@
 use std::fmt;
 
+use crownos_config::system::ai::Runtime;
 use serde::{Deserialize, Serialize};
 
 use crate::error::InferError;
 
-/// The vector space of an embedding model. Vectors from different spaces do not compare, so
-/// a store that sees a new space must embed its content again.
+/// The vector space of one build of an embedding model. Vectors from different spaces do
+/// not compare, so a store that sees a new space must embed its content again. Two builds
+/// of the same model (int8 ONNX, Q8 GGUF) are different spaces.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EmbedSpace {
     pub model: String,
+    pub runtime: Runtime,
+    pub quantization: String,
     pub dimensions: u32,
 }
 
 impl fmt::Display for EmbedSpace {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}/{}", self.model, self.dimensions)
+        write!(
+            formatter,
+            "{}/{:?}/{}/{}",
+            self.model, self.runtime, self.quantization, self.dimensions
+        )
     }
 }
 

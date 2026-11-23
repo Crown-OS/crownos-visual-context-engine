@@ -18,7 +18,7 @@ pub struct LoadSpec<'a> {
 }
 
 impl<'a> LoadSpec<'a> {
-    pub(crate) fn new(
+    pub fn new(
         registry: &'a Registry,
         candidate: &'a Candidate,
         models_dir: &'a Path,
@@ -43,6 +43,8 @@ impl<'a> LoadSpec<'a> {
     pub fn embed_space(&self) -> Option<EmbedSpace> {
         Some(EmbedSpace {
             model: self.model_id.to_owned(),
+            runtime: self.artifact.runtime(),
+            quantization: self.artifact.quantization().to_owned(),
             dimensions: self.model.embedding_dimensions?,
         })
     }

@@ -6,7 +6,7 @@ mod summarize;
 
 use crate::capability::{EmbedPurpose, EmbedSpace, TextLine};
 use crate::error::InferError;
-use crate::media::RgbImage;
+use crate::media::Image;
 use crate::request::Job;
 use crate::router::EmbeddedTexts;
 
@@ -24,13 +24,13 @@ pub trait ContextTasks: Send + Sync {
 
     fn describe_screen(
         &self,
-        screen: &RgbImage,
+        screen: &Image,
         app_name: &str,
         window_title: &str,
         job: Job,
     ) -> Result<ScreenDescription, InferError>;
 
-    fn recognize_text(&self, image: &RgbImage, job: Job) -> Result<Vec<TextLine>, InferError>;
+    fn recognize_text(&self, image: &Image, job: Job) -> Result<Vec<TextLine>, InferError>;
 
     fn embed_text(
         &self,

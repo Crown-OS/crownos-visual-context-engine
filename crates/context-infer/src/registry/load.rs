@@ -44,6 +44,7 @@ pub enum RegistryError {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RegistryOverride {
     #[serde(default)]
     models: BTreeMap<String, ModelEntry>,
@@ -52,20 +53,36 @@ struct RegistryOverride {
 }
 
 impl Registry {
-    /// The system catalog with the user's override file on top, when that file exists.
+    /// The system catalog with the user's override file on top, when that file exists. A
+    /// user file that does not parse or validate is logged and ignored.
     pub fn load(system: &Path, user_override: Option<&Path>) -> Result<Self, RegistryError> {
-        let mut registry: Self = read_ron(system)?.ok_or_else(|| RegistryError::Read {
+        let registry: Self = read_ron(system)?.ok_or_else(|| RegistryError::Read {
             path: system.to_owned(),
             source: io::ErrorKind::NotFound.into(),
         })?;
-        if let Some(changes) = user_override
-            .map(read_ron::<RegistryOverride>)
-            .transpose()?
-        {
-            registry.apply(changes.unwrap_or_default());
-        }
         registry.validate()?;
-        Ok(registry)
+        let Some(user_override) = user_override else {
+            return Ok(registry);
+        };
+        match registry.with_override(user_override) {
+            Ok(Some(changed)) => Ok(changed),
+            Ok(None) => Ok(registry),
+            Err(error) => {
+                tracing::warn!(%error, "ignoring the user model registry");
+                Ok(registry)
+            }
+        }
+    }
+
+    fn with_override(&self, path: &Path) -> Result<Option<Self>, RegistryError> {
+        let Some(changes) = read_ron::<RegistryOverride>(path)? else {
+            return Ok(None);
+        };
+        let mut changed = self.clone();
+        changed.models.extend(changes.models);
+        changed.tasks.extend(changes.tasks);
+        changed.validate()?;
+        Ok(Some(changed))
     }
 
     pub fn from_ron(text: &str) -> Result<Self, RegistryError> {
@@ -75,11 +92,6 @@ impl Registry {
         })?;
         registry.validate()?;
         Ok(registry)
-    }
-
-    fn apply(&mut self, changes: RegistryOverride) {
-        self.models.extend(changes.models);
-        self.tasks.extend(changes.tasks);
     }
 
     fn validate(&self) -> Result<(), RegistryError> {

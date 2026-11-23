@@ -47,7 +47,7 @@ fn the_shipped_registry_is_valid() {
         assert!(!registry.candidates(task).is_empty(), "{task:?}");
     }
     let ocr = &registry.models["pp-ocrv6-det-tiny-rec-small"];
-    let Some(Artifact::Onnx { graphs, files }) = ocr.artifact_for(Runtime::OnnxRuntime) else {
+    let Some(Artifact::Onnx { graphs, files, .. }) = ocr.artifact_for(Runtime::OnnxRuntime) else {
         panic!("no ONNX artifact");
     };
     assert!(graphs.contains_key("det") && graphs.contains_key("rec"));
@@ -121,4 +121,28 @@ fn the_user_file_replaces_models_and_task_lists_by_name() {
     let missing_user_file = system.with_extension("absent");
     let registry = Registry::load(&system, Some(&missing_user_file)).unwrap();
     assert_eq!(registry.candidates(Task::RecognizeText)[0].model, "ocr");
+}
+
+#[test]
+fn a_broken_user_file_falls_back_to_the_system_registry() {
+    let system = scratch_file("system-for-broken.ron", MINIMAL);
+    for (name, contents) in [
+        ("syntax.ron", "(tasks: {RecognizeText: [("),
+        (
+            "field.ron",
+            r#"(tasks: {RecognizeText: [(model: "ocr", runtime: OnnxRuntime, device: Cpu, typo: 1)]})"#,
+        ),
+        (
+            "unknown-model.ron",
+            r#"(tasks: {RecognizeText: [(model: "nope", runtime: OnnxRuntime, device: Cpu)]})"#,
+        ),
+    ] {
+        let user = scratch_file(name, contents);
+        let registry = Registry::load(&system, Some(&user)).unwrap();
+        assert_eq!(
+            registry.candidates(Task::RecognizeText)[0].model,
+            "ocr",
+            "{name}"
+        );
+    }
 }

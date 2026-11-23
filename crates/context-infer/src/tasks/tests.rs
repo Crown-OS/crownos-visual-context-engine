@@ -9,7 +9,7 @@ use crownos_config::system::ai::{Device, Runtime};
 use super::{ContentKind, ContextTasks, RoutedTasks, SegmentDigest};
 use crate::capability::{Generate, GenerateCapabilities};
 use crate::error::InferError;
-use crate::media::RgbImage;
+use crate::media::Image;
 use crate::registry::Registry;
 use crate::request::{GenRequest, Generation, Job, Output, Priority};
 use crate::router::{LoadSpec, Router, RouterSettings, RuntimeBackend};
@@ -91,8 +91,8 @@ fn job() -> Job {
     Job::within(Duration::from_secs(2), Priority::Interactive)
 }
 
-fn screen() -> RgbImage {
-    RgbImage::new(2, 2, 6, vec![0; 12].into()).unwrap()
+fn screen() -> Image {
+    Image::new(2, 2, 6, crate::PixelFormat::Rgb8, vec![0; 12].into()).unwrap()
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn describe_screen_sends_raw_pixels_and_a_schema() {
     assert_eq!(description.visible_entities, ["router.rs"]);
 
     let request = generator.last_request.lock().unwrap().clone().unwrap();
-    assert!(matches!(request.media.as_slice(), [crate::Media::Rgb8(_)]));
+    assert!(matches!(request.media.as_slice(), [crate::Media::Image(_)]));
     let Output::Json(schema) = request.output else {
         panic!("no schema");
     };
