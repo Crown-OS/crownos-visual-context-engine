@@ -15,4 +15,5 @@ jobs:
   ci:
     uses: Crown-OS/.github/.github/workflows/rust.yml@main
     with:
-      packages: libxkbcommon
+      # llama.cpp builds with cmake and clang.
+      packages: libxkbcommon cmake clang

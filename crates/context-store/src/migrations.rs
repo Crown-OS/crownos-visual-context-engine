@@ -82,7 +82,6 @@ CREATE TABLE frames(
     width INTEGER NOT NULL,
     height INTEGER NOT NULL,
     damage_ratio REAL NOT NULL,
-    thumb_path TEXT,
     line_count INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 CREATE INDEX frames_segment ON frames(segment_id);

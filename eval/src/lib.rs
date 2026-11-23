@@ -3,6 +3,7 @@
 //! gold segments it should recover. Nothing here comes from a real screen.
 
 mod gold;
+pub mod pixel_scan;
 mod scenario;
 mod trace;
 mod util;

@@ -1,0 +1,30 @@
+[package]
+name = "context-infer-llama"
+description = "llama.cpp backend of the model layer: generation with images and JSON schemas, GGUF embeddings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+# Each builds one more ggml backend module; packaging builds all of them.
+vulkan = ["llama-cpp-2/vulkan"]
+cuda = ["llama-cpp-2/cuda"]
+rocm = ["llama-cpp-2/rocm"]
+
+[dependencies]
+context-infer = { workspace = true }
+crownos-config = { workspace = true }
+llama-cpp-2 = { version = "0.1.161", default-features = false, features = [
+  "common",
+  "dynamic-backends",
+  "mtmd",
+  "openmp",
+] }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

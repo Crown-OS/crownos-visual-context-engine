@@ -3,6 +3,7 @@
 //! thread waits for it to appear and reconnects if the compositor goes away.
 
 mod dispatch;
+mod link;
 mod state;
 
 use std::sync::mpsc::SyncSender;
@@ -17,7 +18,11 @@ use context_core::Observation;
 use wayland_client::globals::{BindError, registry_queue_init};
 use wayland_client::{Connection, DispatchError};
 
+pub use crate::util::identifiable_connect::ExposureRefused;
+pub use link::{BridgeLink, ExposureHook, SensitiveReason};
 use state::BridgeState;
+
+use crate::util::identifiable_connect::connect_identifiable;
 
 /// Where the bridge puts what it sees.
 pub type Outlet = SyncSender<Observation>;
@@ -34,6 +39,8 @@ pub enum BridgeError {
     Dispatch(#[from] DispatchError),
     #[error("cannot start the bridge thread: {0}")]
     Thread(#[from] std::io::Error),
+    #[error(transparent)]
+    ExposureRefused(#[from] ExposureRefused),
 }
 
 const RETRY: Duration = Duration::from_secs(3);
@@ -43,6 +50,7 @@ const RETRY: Duration = Duration::from_secs(3);
 pub struct BridgeHandle {
     stop: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
+    link: BridgeLink,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -50,6 +58,10 @@ impl BridgeHandle {
     /// Whether the context global is bound right now.
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
+    }
+
+    pub fn link(&self) -> BridgeLink {
+        self.link.clone()
     }
 }
 
@@ -72,24 +84,29 @@ impl CompositorBridge {
     pub fn spawn(outlet: Outlet) -> Result<BridgeHandle, BridgeError> {
         let stop = Arc::new(AtomicBool::new(false));
         let connected = Arc::new(AtomicBool::new(false));
+        let link = BridgeLink::default();
         let thread = std::thread::Builder::new()
             .name("context-bridge".to_owned())
             .spawn({
                 let stop = Arc::clone(&stop);
                 let connected = Arc::clone(&connected);
-                move || run_forever(&outlet, &stop, &connected)
+                let link = link.clone();
+                move || run_forever(&outlet, &link, &stop, &connected)
             })?;
         Ok(BridgeHandle {
             stop,
             connected,
+            link,
             thread: Some(thread),
         })
     }
 }
 
-fn run_forever(outlet: &Outlet, stop: &AtomicBool, connected: &AtomicBool) {
+fn run_forever(outlet: &Outlet, link: &BridgeLink, stop: &AtomicBool, connected: &AtomicBool) {
     while !stop.load(Ordering::Relaxed) {
-        match run_once(outlet, stop, connected) {
+        let outcome = run_once(outlet, link, stop, connected);
+        link.disconnected();
+        match outcome {
             Ok(()) => return,
             Err(BridgeError::Bind(BindError::NotPresent)) => {
                 tracing::info!("the compositor offers no context protocol yet; waiting")
@@ -101,11 +118,21 @@ fn run_forever(outlet: &Outlet, stop: &AtomicBool, connected: &AtomicBool) {
     }
 }
 
-fn run_once(outlet: &Outlet, stop: &AtomicBool, connected: &AtomicBool) -> Result<(), BridgeError> {
-    let connection = Connection::connect_to_env()?;
-    let (globals, mut queue) = registry_queue_init::<BridgeState>(&connection)?;
+fn run_once(
+    outlet: &Outlet,
+    link: &BridgeLink,
+    stop: &AtomicBool,
+    connected: &AtomicBool,
+) -> Result<(), BridgeError> {
+    let exposure = link.exposure_hook();
+    let (connection, globals, mut queue) = connect_identifiable(exposure.as_ref(), || {
+        let connection = Connection::connect_to_env()?;
+        let (globals, queue) = registry_queue_init::<BridgeState>(&connection)?;
+        Ok::<_, BridgeError>((connection, globals, queue))
+    })?;
     let handle = queue.handle();
-    let mut state = BridgeState::bind(&globals, &handle, outlet.clone())?;
+    let mut state = BridgeState::bind(&globals, &handle, outlet.clone(), link.clone())?;
+    link.connected(connection);
     connected.store(true, Ordering::Relaxed);
     tracing::info!("bound crownos_context_manager_v1");
     while !stop.load(Ordering::Relaxed) {

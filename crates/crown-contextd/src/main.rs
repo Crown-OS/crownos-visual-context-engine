@@ -3,9 +3,15 @@
 //! answers the Context API on crownos-ipc.
 
 mod api;
+mod capture;
+mod capture_output;
+mod local_sensitivity;
 mod logging;
 mod pipeline;
+#[cfg(test)]
+mod pipeline_privacy_tests;
 mod shared;
+mod sleep_guard;
 mod util;
 
 use std::path::PathBuf;
@@ -46,6 +52,8 @@ struct Cli {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     logging::init();
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+        .context("turning off core dumps and ptrace for this process")?;
     let cli = Cli::parse();
     let mut section: VisualContext = crownos_config::load(VisualContext::SECTION);
     if cli.replay.is_some() {
@@ -58,7 +66,15 @@ async fn main() -> Result<()> {
     let reader = Store::open_dir(&state_dir).context("opening the store for reads")?;
     tracing::info!(state_dir = %state_dir.display(), encrypted = Store::is_encrypted(), "store open");
 
+    // Bind the socket before a thread starts, so a second instance stops before it observes.
+    let mut builder = ServiceBuilder::new(context_protocol::SERVICE);
+    if let Some(dir) = &cli.socket_dir {
+        builder = builder.directory(dir);
+    }
+    let mut server = builder.build().context("binding the context socket")?;
+
     let (outlet, observations) = mpsc::sync_channel(OBSERVATION_QUEUE);
+    let capture_outlet = outlet.clone();
     let shared = Arc::new(Mutex::new(Shared::new(section.enabled)));
     let bridge = match &cli.replay {
         Some(path) => {
@@ -75,6 +91,23 @@ async fn main() -> Result<()> {
         None => Some(CompositorBridge::spawn(outlet).context("starting the compositor bridge")?),
     };
 
+    let capturing = match &bridge {
+        Some(bridge) if section.enabled => {
+            let link = bridge.link();
+            let service = capture::spawn(&link, capture_outlet, cli.socket_dir.clone())?;
+            tokio::spawn({
+                let service = Arc::clone(&service);
+                async move {
+                    if let Err(error) = sleep_guard::guard_sleep(service).await {
+                        tracing::warn!(%error, "frames are not zeroed before sleep");
+                    }
+                }
+            });
+            Some(pipeline::Capturing { service, link })
+        }
+        _ => None,
+    };
+
     let (events, outbox) = tokio::sync::mpsc::unbounded_channel();
     let pipeline = pipeline::spawn(
         observations,
@@ -82,13 +115,9 @@ async fn main() -> Result<()> {
         writer.handle(),
         Arc::clone(&shared),
         events,
+        capturing,
     )?;
 
-    let mut builder = ServiceBuilder::new(context_protocol::SERVICE);
-    if let Some(dir) = &cli.socket_dir {
-        builder = builder.directory(dir);
-    }
-    let mut server = builder.build().context("binding the context socket")?;
     tracing::info!(
         service = context_protocol::SERVICE,
         "serving the Context API"
