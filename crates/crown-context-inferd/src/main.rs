@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use clap::Parser;
 use context_infer::Policy;
 use crownos_ipc::ServiceBuilder;
@@ -96,7 +96,8 @@ async fn main() -> Result<()> {
         _ = terminate.recv() => tracing::info!("stopping"),
         () = watch => {
             engine.save_benchmarks();
-            bail!("too many model threads hang; exiting so that systemd restarts the service");
+            tracing::error!("too many model threads hang; exiting so that systemd restarts the service");
+            std::process::exit(1);
         }
     }
     idle_unload.abort();

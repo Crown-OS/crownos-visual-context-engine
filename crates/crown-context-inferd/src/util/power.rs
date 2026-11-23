@@ -2,7 +2,8 @@ use std::path::Path;
 
 const POWER_SUPPLIES: &str = "/sys/class/power_supply";
 
-/// True when a battery is present and no mains or USB supply is online.
+/// True when a system battery is present and no mains or USB supply is online. Batteries of
+/// devices (`scope` = `Device`, such as a wireless mouse) do not count.
 pub(crate) fn on_battery() -> bool {
     on_battery_in(Path::new(POWER_SUPPLIES))
 }
@@ -19,6 +20,9 @@ fn on_battery_in(supplies: &Path) -> bool {
     let (mut battery, mut external_power) = (false, false);
     for entry in entries.flatten() {
         let path = entry.path();
+        if read(&path, "scope") == "Device" {
+            continue;
+        }
         match read(&path, "type").as_str() {
             "Battery" => battery = true,
             "Mains" | "USB" => external_power |= read(&path, "online") == "1",
@@ -38,6 +42,15 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("type"), kind).unwrap();
         std::fs::write(directory.join("online"), online).unwrap();
+    }
+
+    #[test]
+    fn a_desktop_with_a_wireless_mouse_is_not_on_battery() {
+        let root = std::env::temp_dir().join(format!("inferd-mouse-{}", std::process::id()));
+        supply(&root, "hidpp_battery_0", "Battery\n", "");
+        std::fs::write(root.join("hidpp_battery_0").join("scope"), "Device\n").unwrap();
+        assert!(!on_battery_in(&root));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
