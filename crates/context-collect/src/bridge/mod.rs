@@ -16,9 +16,10 @@ use std::time::Duration;
 
 use context_core::Observation;
 use wayland_client::globals::{BindError, registry_queue_init};
-use wayland_client::{Connection, DispatchError};
+use wayland_client::{Connection, DispatchError, Proxy};
 
 pub use crate::util::identifiable_connect::ExposureRefused;
+use crownos_protocols::context::v1::client::crownos_context_manager_v1::Scope;
 pub use link::{CompositorLink, ExposureHook, SensitiveReason};
 use state::BridgeState;
 
@@ -126,6 +127,9 @@ fn run_once(
     })?;
     let handle = queue.handle();
     let mut state = BridgeState::bind(&globals, &handle, outlet.clone(), link.clone())?;
+    if state.manager.version() < 2 {
+        link.set_granted(Scope::Engine.bits());
+    }
     link.attach(connection);
     connected.store(true, Ordering::Relaxed);
     tracing::info!("bound crownos_context_manager_v1");

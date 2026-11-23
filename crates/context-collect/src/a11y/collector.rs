@@ -14,6 +14,7 @@ use super::events::{AccessibilityEvent, EventKind};
 use super::health::ObjectHealth;
 use super::read::{FrameContent, active_frame, read_frame};
 use super::reader::{AccessibilityBusConnection, ReadError};
+use super::recent_readings::{AccessibleText, RecentReadings};
 use super::schedule::{ReadSchedule, Wake};
 use super::window_match::match_window;
 use super::{A11yError, AccessibilityHost};
@@ -29,6 +30,7 @@ pub(crate) struct Collector<'h, H> {
     bus: AccessibilityBusConnection,
     host: &'h H,
     outlet: Outlet,
+    readings: RecentReadings,
     health: RefCell<ObjectHealth>,
     applications: ApplicationDirectory,
     resolver: AppResolver,
@@ -49,11 +51,17 @@ impl<H> std::fmt::Debug for Collector<'_, H> {
 }
 
 impl<'h, H: AccessibilityHost> Collector<'h, H> {
-    pub(crate) fn new(bus: AccessibilityBusConnection, host: &'h H, outlet: Outlet) -> Self {
+    pub(crate) fn new(
+        bus: AccessibilityBusConnection,
+        host: &'h H,
+        outlet: Outlet,
+        readings: RecentReadings,
+    ) -> Self {
         Self {
             bus,
             host,
             outlet,
+            readings,
             health: RefCell::default(),
             applications: ApplicationDirectory::default(),
             resolver: AppResolver::default(),
@@ -240,24 +248,44 @@ impl<'h, H: AccessibilityHost> Collector<'h, H> {
             return Ok(true);
         };
         if !self.host.may_read(&record, &title) {
+            self.readings.forget(&record.ident);
             return Ok(true);
         }
-        match read_frame(&reader, &root, &frame).await? {
+        let content = match read_frame(&reader, &root, &frame).await {
+            Ok(content) => content,
+            Err(error) => {
+                self.readings.forget(&record.ident);
+                return Err(error);
+            }
+        };
+        match content {
             FrameContent::Sensitive => {
+                self.readings
+                    .record(&record.ident, AccessibleText::Sensitive);
                 self.host.flag_sensitive(&record.ident);
                 Ok(true)
             }
-            FrameContent::Incomplete => Ok(false),
+            FrameContent::Incomplete => {
+                self.readings.record(&record.ident, AccessibleText::Unread);
+                Ok(false)
+            }
             FrameContent::Text {
                 lines,
                 url,
                 complete,
                 ..
             } => {
-                if !lines.is_empty()
-                    && may_send(self.host, &record.ident, &title)
-                    && self.dedup.is_new(&record.ident, &lines, Instant::now())
-                {
+                if !may_send(self.host, &record.ident, &title) {
+                    self.readings.forget(&record.ident);
+                    return Ok(complete);
+                }
+                let text = if complete && !lines.is_empty() {
+                    AccessibleText::Lines(lines.clone())
+                } else {
+                    AccessibleText::Unread
+                };
+                self.readings.record(&record.ident, text);
+                if !lines.is_empty() && self.dedup.is_new(&record.ident, &lines, Instant::now()) {
                     self.emit(record.ident, url, lines);
                 }
                 Ok(complete)

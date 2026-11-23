@@ -26,6 +26,7 @@ mod node;
 mod probe;
 mod read;
 mod reader;
+mod recent_readings;
 mod schedule;
 mod toolkit;
 mod window_match;
@@ -43,9 +44,10 @@ pub use calls::AtspiCall;
 pub use probe::{WindowReading, read_active_window};
 pub use read::FrameContent;
 pub use reader::ReadError;
+pub use recent_readings::{AccessibleText, RecentReadings};
 pub use toolkit::{FetchStrategy, Toolkit};
 
-use crate::{CompositorLink, Outlet, WindowTable};
+use crate::{Outlet, WindowTable};
 use collector::Collector;
 use reader::AccessibilityBusConnection;
 
@@ -62,12 +64,6 @@ pub trait AccessibilityHost: Send + 'static {
     fn may_read(&self, window: &WindowRecord, frame_title: &str) -> bool;
 
     fn flag_sensitive(&self, window: &WindowIdent);
-}
-
-/// The compositor's own verdict: no read while paused or locked, of a sensitive window or of
-/// moving pictures. The engine's policy comes on top of this.
-pub fn compositor_allows_read(link: &CompositorLink, window: &WindowRecord) -> bool {
-    link.is_observing() && !window.sensitivity.any() && !window.content_type.is_motion()
 }
 
 const RETRY: Duration = Duration::from_secs(10);
@@ -118,7 +114,8 @@ impl Drop for AccessibilityHandle {
 pub struct AccessibilityCollector;
 
 impl AccessibilityCollector {
-    /// Starts the collector on its own thread. A missing a11y bus is retried there.
+    /// Starts the collector on its own thread. A missing a11y bus is retried there. Each read
+    /// is also kept in `readings`, for the capture path.
     ///
     /// # Errors
     ///
@@ -127,11 +124,12 @@ impl AccessibilityCollector {
         outlet: Outlet,
         host: H,
         bus: AccessibilityBus,
+        readings: RecentReadings,
     ) -> Result<AccessibilityHandle, A11yError> {
         let (stop, stopped) = watch::channel(false);
         let thread = std::thread::Builder::new()
             .name("context-a11y".to_owned())
-            .spawn(move || run_forever(&outlet, &host, &bus, stopped))?;
+            .spawn(move || run_forever(&outlet, &host, &bus, &readings, stopped))?;
         Ok(AccessibilityHandle {
             stop,
             thread: Some(thread),
@@ -143,6 +141,7 @@ fn run_forever<H: AccessibilityHost>(
     outlet: &Outlet,
     host: &H,
     bus: &AccessibilityBus,
+    readings: &RecentReadings,
     mut stop: watch::Receiver<bool>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -159,7 +158,7 @@ fn run_forever<H: AccessibilityHost>(
         loop {
             let mut session_stop = stop.clone();
             let outcome = tokio::select! {
-                outcome = run_once(outlet, host, bus, &mut session_stop) => outcome,
+                outcome = run_once(outlet, host, bus, readings, &mut session_stop) => outcome,
                 _ = stop.changed() => return,
             };
             match outcome {
@@ -178,6 +177,7 @@ async fn run_once<H: AccessibilityHost>(
     outlet: &Outlet,
     host: &H,
     bus: &AccessibilityBus,
+    readings: &RecentReadings,
     stop: &mut watch::Receiver<bool>,
 ) -> Result<(), A11yError> {
     let connection = match bus {
@@ -194,7 +194,7 @@ async fn run_once<H: AccessibilityHost>(
         let _ = forward.try_send(event);
         std::future::ready(())
     }));
-    let outcome = Collector::new(bus, host, outlet.clone())
+    let outcome = Collector::new(bus, host, outlet.clone(), readings.clone())
         .run(received, stop)
         .await;
     forwarder.abort();

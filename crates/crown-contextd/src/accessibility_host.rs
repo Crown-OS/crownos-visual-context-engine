@@ -5,13 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use context_collect::WindowTable;
-use context_collect::a11y::{AccessibilityHost, compositor_allows_read};
+use context_collect::a11y::AccessibilityHost;
 use context_collect::{CompositorLink, SensitiveReason};
 use context_core::{WindowIdent, WindowRecord};
 use context_policy::Policy;
 use tokio::sync::watch;
 
 use crate::shared::Shared;
+use crate::text_gate::may_read_window;
 
 /// How long the compositor refuses captures of a window that shows a password field. The
 /// collector flags the window again on each read while the field stays.
@@ -36,12 +37,6 @@ impl ContextHost {
             shared,
         }
     }
-
-    fn engine_observes(&self) -> bool {
-        self.shared
-            .lock()
-            .is_ok_and(|shared| shared.enabled && !shared.paused)
-    }
 }
 
 impl AccessibilityHost for ContextHost {
@@ -53,19 +48,29 @@ impl AccessibilityHost for ContextHost {
         self.link.watch_focus()
     }
 
+    /// The content gate, and the frame title the toolkit shows, which can differ from the
+    /// compositor's.
     fn may_read(&self, window: &WindowRecord, frame_title: &str) -> bool {
-        compositor_allows_read(&self.link, window)
-            && self.policy.judge(window).allows_text()
-            && !self.policy.is_private_title(frame_title)
-            && self.engine_observes()
+        !self.policy.is_private_title(frame_title)
+            && self
+                .shared
+                .lock()
+                .is_ok_and(|shared| may_read_window(&shared, &self.link, &self.policy, window))
     }
 
+    /// Flags the window at the compositor, and holds it in the engine too, so a capture that is
+    /// already due does not read it.
     fn flag_sensitive(&self, window: &WindowIdent) {
         self.link.flag_sensitive(
             window,
             SensitiveReason::SecretText,
             PASSWORD_FIELD_FLAG_DURATION,
         );
+        if let Ok(mut shared) = self.shared.lock() {
+            shared
+                .locally_sensitive
+                .mark(window, PASSWORD_FIELD_FLAG_DURATION);
+        }
     }
 }
 
@@ -88,7 +93,7 @@ mod tests {
             ..VisualContext::default()
         };
         ContextHost::new(
-            CompositorLink::default(),
+            CompositorLink::with_engine_scope(),
             Arc::new(Policy::from_section(&section).unwrap()),
             Arc::new(Mutex::new(Shared::new(true))),
         )

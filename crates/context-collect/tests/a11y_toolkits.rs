@@ -25,8 +25,8 @@ use std::time::Duration;
 
 use context_collect::WindowTable;
 use context_collect::a11y::{
-    AccessibilityBus, AccessibilityCollector, AccessibilityHost, AtspiCall, FetchStrategy,
-    FrameContent, Toolkit, WindowReading, read_active_window,
+    AccessibilityBus, AccessibilityCollector, AccessibilityHost, AccessibleText, AtspiCall,
+    FetchStrategy, FrameContent, RecentReadings, Toolkit, WindowReading, read_active_window,
 };
 use context_core::{Observation, ObservationKind, TextSource, WindowIdent, WindowRecord};
 use tokio::sync::watch;
@@ -233,11 +233,22 @@ async fn the_collector_reads_on_focus_and_again_after_typing() {
     read_until_titled(&connection, &bus_name, GTK4_TITLE, None).await;
     let (ident, host) = focused_probe(probe.pid());
     let (outlet, observations) = mpsc::sync_channel(16);
-    let _collector =
-        AccessibilityCollector::spawn(outlet, host, AccessibilityBus::Address(a11y)).unwrap();
+    let readings = RecentReadings::default();
+    let _collector = AccessibilityCollector::spawn(
+        outlet,
+        host,
+        AccessibilityBus::Address(a11y),
+        readings.clone(),
+    )
+    .unwrap();
     let (observations, window, lines) = next_text(observations).await;
     assert_eq!(window, ident);
     assert_probe_text(&lines);
+    let kept = readings.fresh(&ident, Duration::from_secs(5), Duration::ZERO);
+    assert!(
+        matches!(&kept, Some(AccessibleText::Lines(kept)) if *kept == lines),
+        "{kept:?}"
+    );
     let (_, window, lines) = next_text(observations).await;
     assert_eq!(window, ident);
     assert!(lines.iter().any(|line| line == RETYPED_TEXT), "{lines:?}");

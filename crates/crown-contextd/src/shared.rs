@@ -3,6 +3,8 @@
 use context_engine::Engine;
 use context_protocol::CaptureState;
 
+use crate::local_sensitivity::LocalSensitivity;
+
 #[derive(Debug)]
 pub(crate) struct Shared {
     pub(crate) engine: Engine,
@@ -11,6 +13,8 @@ pub(crate) struct Shared {
     pub(crate) pause_reason: Option<String>,
     pub(crate) observations_seen: u64,
     pub(crate) observations_dropped: u64,
+    /// Windows the engine itself holds as sensitive, for capture and the a11y collector alike.
+    pub(crate) locally_sensitive: LocalSensitivity,
 }
 
 impl Shared {
@@ -22,6 +26,7 @@ impl Shared {
             pause_reason: None,
             observations_seen: 0,
             observations_dropped: 0,
+            locally_sensitive: LocalSensitivity::default(),
         }
     }
 

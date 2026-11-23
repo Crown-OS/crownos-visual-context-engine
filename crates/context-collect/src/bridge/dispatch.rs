@@ -148,10 +148,11 @@ impl Dispatch<CrownosContextManagerV1, ()> for BridgeState {
                     WEnum::Unknown(bits) => bits,
                 };
                 tracing::info!(scope = bits, "the compositor granted a context scope");
-                state.scope = Some(bits);
+                state.link.set_granted(bits);
             }
             Event::Revoked { .. } => {
                 tracing::warn!("the compositor withdrew the context grant");
+                state.link.set_granted(0);
                 state.revoked = true;
             }
             _ => {}

@@ -8,15 +8,17 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use context_capture::{
     CaptureHold, CaptureOutcome, CaptureService, CaptureServiceParts, CaptureTarget,
-    InferScreenModels, NoStructuredText,
+    InferScreenModels,
 };
+use context_collect::a11y::RecentReadings;
 use context_collect::{CompositorLink, SensitiveReason};
 use context_core::{Observation, Trigger, WindowIdent};
 use context_infer_client::InferdClient;
-use context_policy::{Policy, Verdict};
+use context_policy::Policy;
 
-use crate::local_sensitivity::LocalSensitivity;
 use crate::shared::Shared;
+use crate::structured_text::WindowStructuredText;
+use crate::text_gate::may_read_window;
 use crate::util::power_supply::on_battery;
 
 /// How long the bridge waits for the frames to be zeroed before it shows the process to the
@@ -27,13 +29,15 @@ const IDENTITY_EXPOSURE_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const SECRET_FLAG_DURATION: Duration = Duration::from_secs(10 * 60);
 
 /// Starts capture and analysis. Outcomes come back as observations through `outlet`, so they
-/// pass the same policy gate as everything else.
+/// pass the same policy gate as everything else. Windows with a recent a11y reading in
+/// `readings` are not read by OCR.
 /// Models run in crown-context-inferd, found in `socket_dir` (default
 /// `$XDG_RUNTIME_DIR/crownos`).
 pub(crate) fn spawn(
     link: &CompositorLink,
     outlet: SyncSender<Observation>,
     socket_dir: Option<PathBuf>,
+    readings: RecentReadings,
 ) -> Result<Arc<CaptureService>> {
     let deliver = move |outcome: CaptureOutcome| {
         for observation in outcome.observations() {
@@ -44,7 +48,7 @@ pub(crate) fn spawn(
     };
     let parts = CaptureServiceParts {
         models: Arc::new(InferScreenModels::new(InferdClient::new(socket_dir))),
-        structured_text: Box::new(NoStructuredText),
+        structured_text: Box::new(WindowStructuredText::new(readings)),
         on_battery: Box::new(on_battery),
         deliver: Box::new(deliver),
     };
@@ -77,25 +81,21 @@ pub(crate) fn flag_secret(link: &CompositorLink, window: &WindowIdent) -> bool {
     flagged
 }
 
-/// The focused window as a capture target, when every gate passes: observation is on, the
-/// window is still the one the trigger was for, the policy allows text from it, and no secret
-/// was seen in it lately.
+/// The focused window as a capture target, when the window is still the one the trigger was
+/// for, the compositor grants captures, and the content gate passes.
 pub(crate) fn target(
     shared: &Shared,
+    link: &CompositorLink,
     policy: &Policy,
-    locally_sensitive: &LocalSensitivity,
     trigger: Trigger,
     window: Option<&WindowIdent>,
 ) -> Option<CaptureTarget> {
-    if !shared.enabled || shared.paused || !shared.engine.is_observing() {
-        return None;
-    }
     let focus = shared.engine.working_memory().focus.as_ref()?;
     if window.is_some_and(|window| window != focus) {
         return None;
     }
     let record = shared.engine.window(focus)?;
-    if policy.judge(record) != Verdict::Observe || locally_sensitive.is_marked(focus) {
+    if !link.grants_capture() || !may_read_window(shared, link, policy, record) {
         return None;
     }
     let app = shared.engine.app_of(focus)?;

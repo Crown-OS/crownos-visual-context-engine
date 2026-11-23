@@ -21,8 +21,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::capture;
 use crate::capture_output::CaptureOutput;
-use crate::local_sensitivity::LocalSensitivity;
 use crate::shared::Shared;
+use crate::text_gate::may_read_window;
 
 /// `ContextChanged` goes out at most this often.
 const CONTEXT_INTERVAL: Duration = Duration::from_millis(250);
@@ -93,7 +93,6 @@ pub(crate) fn spawn(
                     capturing,
                     scheduler: CaptureScheduler::default(),
                     capture_output: CaptureOutput::default(),
-                    locally_sensitive: LocalSensitivity::default(),
                 };
                 worker.run(&observations, &stop);
             }
@@ -117,7 +116,6 @@ struct Worker {
     capturing: Option<Arc<CaptureService>>,
     scheduler: CaptureScheduler,
     capture_output: CaptureOutput,
-    locally_sensitive: LocalSensitivity,
 }
 
 impl Worker {
@@ -136,13 +134,14 @@ impl Worker {
     }
 
     fn observe(&mut self, observation: Observation) {
-        let holds_secret = self.holds_secret(&observation);
+        let secret_window = window_with_secret(&observation);
         let shared = Arc::clone(&self.shared);
         let Ok(mut shared) = shared.lock() else {
             return;
         };
         shared.observations_seen += 1;
-        if holds_secret {
+        if let Some(window) = secret_window {
+            self.hold_secret_window(&mut shared, window);
             shared.observations_dropped += 1;
             return;
         }
@@ -273,35 +272,25 @@ impl Worker {
         let Some((trigger, window)) = self.scheduler.take_due(Timestamp::now()) else {
             return;
         };
-        let Ok(shared) = self.shared.lock() else {
+        let Ok(mut shared) = self.shared.lock() else {
             return;
         };
-        self.locally_sensitive.forget_expired();
-        let target = capture::target(
-            &shared,
-            &self.policy,
-            &self.locally_sensitive,
-            trigger,
-            window.as_ref(),
-        );
+        shared.locally_sensitive.forget_expired();
+        let target = capture::target(&shared, &self.link, &self.policy, trigger, window.as_ref());
         match target {
             Some(target) => capturing.capture(target),
             None => tracing::debug!(?trigger, "a capture was due but a gate refused it"),
         }
     }
 
-    /// Writes the capture output whose segment is open, when the policy still allows text from
+    /// Writes the capture output whose segment is open, when the content gate still passes for
     /// its window: the gates can change between the capture and the store.
     fn write_capture_output(&mut self, shared: &Shared) {
         let still_allowed = |window: &WindowIdent| {
-            shared.enabled
-                && !shared.paused
-                && shared.engine.is_observing()
-                && !self.locally_sensitive.is_marked(window)
-                && shared
-                    .engine
-                    .window(window)
-                    .is_some_and(|record| self.policy.judge(record).allows_text())
+            shared
+                .engine
+                .window(window)
+                .is_some_and(|record| may_read_window(shared, &self.link, &self.policy, record))
         };
         for write in self
             .capture_output
@@ -341,25 +330,17 @@ impl Worker {
         }
     }
 
-    /// Text with a secret in it, from any source, and the record of a capture that saw one, are
-    /// dropped; the window is flagged. Scanned before the shared state is locked, so the API
-    /// never waits on the scan.
-    fn holds_secret(&mut self, observation: &Observation) -> bool {
-        let window = match &observation.kind {
-            ObservationKind::Text {
-                window, lines, url, ..
-            } if shows_secret(lines, url.as_deref()) => window,
-            ObservationKind::Frame(frame) if frame.secret_seen => &frame.window,
-            _ => return false,
-        };
+    /// Drops the waiting output of a window that showed a secret, and flags it at the
+    /// compositor and in the engine.
+    fn hold_secret_window(&mut self, shared: &mut Shared, window: &WindowIdent) {
         self.capture_output.forget_window(window);
         let flagged = capture::flag_secret(&self.link, window);
         if !flagged {
             tracing::info!("the compositor did not take the flag; the engine holds the window");
         }
-        self.locally_sensitive
+        shared
+            .locally_sensitive
             .mark(window, capture::SECRET_FLAG_DURATION);
-        true
     }
 
     fn idle(&mut self) {
@@ -401,6 +382,18 @@ impl Worker {
                 t: Timestamp::now(),
             });
         }
+    }
+}
+
+/// The window of text with a secret in it, from any source, or of a capture that saw one. Scanned
+/// before the shared state is locked, so the API never waits on the scan.
+fn window_with_secret(observation: &Observation) -> Option<&WindowIdent> {
+    match &observation.kind {
+        ObservationKind::Text {
+            window, lines, url, ..
+        } if shows_secret(lines, url.as_deref()) => Some(window),
+        ObservationKind::Frame(frame) if frame.secret_seen => Some(&frame.window),
+        _ => None,
     }
 }
 
@@ -492,7 +485,6 @@ mod tests {
             capturing: None,
             scheduler: CaptureScheduler::default(),
             capture_output: CaptureOutput::default(),
-            locally_sensitive: LocalSensitivity::default(),
         };
         worker.observe(Observation::new(
             Timestamp::now(),

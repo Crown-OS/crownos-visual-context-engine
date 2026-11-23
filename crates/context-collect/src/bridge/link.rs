@@ -1,9 +1,10 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use context_core::WindowIdent;
+use crownos_protocols::context::v1::client::crownos_context_manager_v1::Scope;
 use crownos_protocols::context::v1::client::crownos_context_window_v1::{
     CrownosContextWindowV1, FlagReason,
 };
@@ -41,6 +42,8 @@ struct LinkState {
     focus: watch::Sender<Option<WindowIdent>>,
     paused: AtomicBool,
     locked: AtomicBool,
+    /// The scope the compositor granted this engine, as protocol bits; none while unbound.
+    granted: AtomicU32,
 }
 
 impl std::fmt::Debug for CompositorLink {
@@ -64,6 +67,7 @@ impl Default for CompositorLink {
                 focus: watch::Sender::new(None),
                 paused: AtomicBool::new(false),
                 locked: AtomicBool::new(false),
+                granted: AtomicU32::new(0),
             }),
         }
     }
@@ -85,6 +89,32 @@ impl CompositorLink {
     /// Neither paused by the user nor behind the lock screen.
     pub fn is_observing(&self) -> bool {
         !self.shared.paused.load(Ordering::Relaxed) && !self.shared.locked.load(Ordering::Relaxed)
+    }
+
+    /// The compositor grants this engine window titles and text.
+    pub fn grants_text(&self) -> bool {
+        self.granted().intersects(Scope::Text | Scope::Engine)
+    }
+
+    /// The compositor grants this engine captures of window pixels.
+    pub fn grants_capture(&self) -> bool {
+        self.granted().intersects(Scope::Raw | Scope::Engine)
+    }
+
+    fn granted(&self) -> Scope {
+        Scope::from_bits_truncate(self.shared.granted.load(Ordering::Relaxed))
+    }
+
+    /// A link with the engine scope, as a bound engine has it.
+    #[cfg(feature = "test-support")]
+    pub fn with_engine_scope() -> Self {
+        let link = Self::default();
+        link.set_granted(Scope::Engine.bits());
+        link
+    }
+
+    pub(super) fn set_granted(&self, scope: u32) {
+        self.shared.granted.store(scope, Ordering::Relaxed);
     }
 
     /// The compositor connection while the bridge is bound.
@@ -160,6 +190,7 @@ impl CompositorLink {
         if let Ok(mut slot) = self.shared.connection.lock() {
             *slot = None;
         }
+        self.set_granted(0);
         if let Ok(mut proxies) = self.shared.proxies.lock() {
             proxies.clear();
         }

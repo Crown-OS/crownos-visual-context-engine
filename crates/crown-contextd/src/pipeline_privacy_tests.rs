@@ -163,7 +163,7 @@ fn run_case(case: u64, width: u32, height: u32, lines: Vec<String>) {
         writer.handle(),
         Arc::new(Mutex::new(Shared::new(true))),
         events,
-        CompositorLink::default(),
+        CompositorLink::with_engine_scope(),
         None,
     )
     .unwrap();
@@ -264,7 +264,7 @@ fn run_pipeline(case: u64, kinds: Vec<ObservationKind>) -> PathBuf {
         writer.handle(),
         Arc::new(Mutex::new(Shared::new(true))),
         events,
-        CompositorLink::default(),
+        CompositorLink::with_engine_scope(),
         None,
     )
     .unwrap();

@@ -36,8 +36,6 @@ pub(super) struct BridgeState {
     pub(super) link: CompositorLink,
     pub(super) initial_done: bool,
     closed: bool,
-    /// The scope the compositor granted, from version 2 on.
-    pub(super) scope: Option<u32>,
     pub(super) revoked: bool,
 }
 
@@ -65,7 +63,6 @@ impl BridgeState {
             link,
             initial_done: false,
             closed: false,
-            scope: None,
             revoked: false,
         })
     }

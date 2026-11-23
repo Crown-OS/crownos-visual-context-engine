@@ -14,6 +14,8 @@ mod pipeline;
 mod pipeline_privacy_tests;
 mod shared;
 mod sleep_guard;
+mod structured_text;
+mod text_gate;
 mod util;
 
 use std::cell::RefCell;
@@ -23,7 +25,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use context_collect::a11y::{AccessibilityBus, AccessibilityCollector};
+use context_collect::a11y::{AccessibilityBus, AccessibilityCollector, RecentReadings};
 use context_collect::{CompositorBridge, CompositorLink, replay};
 use context_eval::Trace;
 use context_policy::{Policy, VisualContext};
@@ -93,18 +95,24 @@ async fn main() -> Result<()> {
     let (outlet, observations) = mpsc::sync_channel(OBSERVATION_QUEUE);
     let shared = Arc::new(Mutex::new(Shared::new(section.enabled)));
     let link = CompositorLink::default();
+    let readings = RecentReadings::default();
     let accessibility = if cli.replay.is_none() && section.enabled {
         let host = ContextHost::new(link.clone(), Arc::clone(&policy), Arc::clone(&shared));
         Some(
-            AccessibilityCollector::spawn(outlet.clone(), host, AccessibilityBus::Session)
-                .context("starting the accessibility collector")?,
+            AccessibilityCollector::spawn(
+                outlet.clone(),
+                host,
+                AccessibilityBus::Session,
+                readings.clone(),
+            )
+            .context("starting the accessibility collector")?,
         )
     } else {
         None
     };
     // The capture pipeline sets the exposure hook before the bridge first connects.
     let capturing = if cli.replay.is_none() && section.enabled {
-        let service = capture::spawn(&link, outlet.clone(), cli.socket_dir.clone())?;
+        let service = capture::spawn(&link, outlet.clone(), cli.socket_dir.clone(), readings)?;
         tokio::spawn({
             let service = Arc::clone(&service);
             async move {

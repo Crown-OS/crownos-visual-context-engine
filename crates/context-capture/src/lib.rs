@@ -44,6 +44,6 @@ pub use schedule::CaptureScheduler;
 pub use screen_models::{ModelError, NoScreenModels, RecognizedLine, ScreenModels, ScreenSummary};
 pub use service::{CaptureCounts, CaptureService, CaptureServiceParts};
 pub use session::SessionError;
-pub use structured_text::{NoStructuredText, StructuredLines, StructuredText};
+pub use structured_text::{NoStructuredText, StructuredLines, StructuredReading, StructuredText};
 pub use util::frame_memory::{FrameMemory, FrameMemoryError};
 pub use worker::{OutcomeSink, PowerProbe};

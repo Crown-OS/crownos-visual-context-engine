@@ -287,3 +287,49 @@ fn region_copies_are_closed_after_analysis_and_after_an_error() {
     let open = open_inodes();
     assert!(seen.iter().all(|inode| !open.contains(inode)));
 }
+
+struct FixedReading(StructuredReading);
+
+impl StructuredText for FixedReading {
+    fn window_text(&mut self, _: &WindowIdent) -> StructuredReading {
+        self.0.clone()
+    }
+}
+
+#[test]
+fn structured_text_replaces_ocr_and_is_not_reported_twice() {
+    let models = FakeModels::reading("fn main() {");
+    let accessible = StructuredLines {
+        source: TextSource::Accessibility,
+        lines: vec!["fn main() {".to_owned()],
+    };
+    let mut analyzer = FrameAnalyzer::new(
+        Arc::clone(&models) as Arc<dyn ScreenModels>,
+        Box::new(FixedReading(StructuredReading::Text(accessible.clone()))),
+    );
+    let cancel = AtomicBool::new(false);
+    let outcome = analyzer.analyse(line_at(10, vec![]), on_battery(&cancel));
+    assert_eq!(models.ocr_calls(), 0);
+    assert_eq!(outcome.text, Some(accessible));
+    let observations = outcome.observations();
+    assert_eq!(observations.len(), 1);
+    assert!(
+        matches!(&observations[0].kind, ObservationKind::Frame(record) if record.line_count == 1)
+    );
+}
+
+#[test]
+fn a_window_with_a_password_field_is_dropped_unread() {
+    let models = FakeModels::reading("hunter2");
+    let mut analyzer = FrameAnalyzer::new(
+        Arc::clone(&models) as Arc<dyn ScreenModels>,
+        Box::new(FixedReading(StructuredReading::Sensitive)),
+    );
+    let cancel = AtomicBool::new(false);
+    let outcome = analyzer.analyse(line_at(10, vec![]), plugged_in(&cancel));
+    assert!(outcome.withheld);
+    assert!(outcome.text.is_none() && outcome.description.is_none());
+    assert_eq!(models.ocr_calls() + models.describe_calls(), 0);
+    assert!(models.copies_seen.lock().unwrap().is_empty());
+    assert!(outcome.observations().is_empty());
+}

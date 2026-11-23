@@ -8,7 +8,8 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use context_collect::WindowTable;
 use context_collect::a11y::{
-    AccessibilityBus, AccessibilityCollector, AccessibilityHost, FrameContent, read_active_window,
+    AccessibilityBus, AccessibilityCollector, AccessibilityHost, FrameContent, RecentReadings,
+    read_active_window,
 };
 use context_core::{ObservationKind, WindowIdent, WindowRecord};
 use tokio::sync::watch;
@@ -105,6 +106,7 @@ fn main() -> Result<()> {
         outlet,
         OneWindowHost::new(pid),
         AccessibilityBus::Address(cli.bus),
+        RecentReadings::default(),
     )
     .context("starting the collector")?;
     for observation in observations {

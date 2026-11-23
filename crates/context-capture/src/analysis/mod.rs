@@ -21,7 +21,7 @@ use crate::image_regions::image_like_share;
 use crate::line_cache::LineCaches;
 use crate::region_copy::RegionCopy;
 use crate::screen_models::{ScreenModels, ScreenSummary};
-use crate::structured_text::{StructuredLines, StructuredText};
+use crate::structured_text::{StructuredLines, StructuredReading, StructuredText};
 use crate::tiles::TileHashes;
 use crate::volatile_mask::VolatileMasks;
 
@@ -57,6 +57,9 @@ pub struct CaptureOutcome {
     pub description: Option<ScreenSummary>,
     /// A secret was seen. The text is gone and the window must be flagged sensitive.
     pub secret_found: bool,
+    /// The window showed a password field: the frame was dropped unread, and nothing of this
+    /// capture is reported. The collector that saw the field flagged the window.
+    pub withheld: bool,
     pub cancelled: bool,
 }
 
@@ -65,8 +68,12 @@ impl CaptureOutcome {
         self.text.as_ref().map_or(0, |text| text.lines.len())
     }
 
-    /// The text observations, then the frame record.
+    /// The OCR and caption text, then the frame record. Structured text is not repeated: its
+    /// collector reported it already.
     pub fn observations(&self) -> Vec<Observation> {
+        if self.withheld {
+            return Vec::new();
+        }
         let window = &self.target.window;
         let text = |source: TextSource, lines: Vec<String>| {
             Observation::new(
@@ -80,7 +87,11 @@ impl CaptureOutcome {
             )
         };
         let mut observations = Vec::with_capacity(3);
-        if let Some(found) = self.text.as_ref().filter(|found| !found.lines.is_empty()) {
+        if let Some(found) = self
+            .text
+            .as_ref()
+            .filter(|found| found.source == TextSource::Ocr && !found.lines.is_empty())
+        {
             observations.push(text(found.source, found.lines.clone()));
         }
         if let Some(description) = &self.description {
@@ -152,6 +163,11 @@ impl FrameAnalyzer {
         };
         let target = frame.target.clone();
         let window = &target.window;
+        let structured = match self.structured_text.window_text(window) {
+            StructuredReading::Text(lines) => Some(lines),
+            StructuredReading::Sensitive => return self.withhold(frame),
+            StructuredReading::Unavailable => None,
+        };
         let first_capture = !self.tile_hashes.contains(window);
         let mut changed = self
             .tile_hashes
@@ -165,7 +181,6 @@ impl FrameAnalyzer {
             frame.damage_permille()
         };
 
-        let structured = self.structured_text.window_text(window);
         let crop_plan = match structured {
             Some(_) => None,
             None => union_crop(&changed)
@@ -231,6 +246,7 @@ impl FrameAnalyzer {
             text,
             description,
             secret_found: false,
+            withheld: false,
             cancelled: cancelled(),
         };
         if contains_secret(&outcome) {
@@ -240,6 +256,30 @@ impl FrameAnalyzer {
             outcome.secret_found = true;
         }
         outcome
+    }
+
+    /// Drops `frame` before any of its pixels is read.
+    fn withhold(&mut self, frame: CapturedFrame) -> CaptureOutcome {
+        let (target, captured_at, width, height) = (
+            frame.target.clone(),
+            frame.captured_at,
+            frame.width,
+            frame.height,
+        );
+        drop(frame);
+        self.forget_window(&target.window);
+        CaptureOutcome {
+            target,
+            captured_at,
+            width,
+            height,
+            damage_permille: 0,
+            text: None,
+            description: None,
+            secret_found: false,
+            withheld: true,
+            cancelled: false,
+        }
     }
 
     pub fn forget_window(&mut self, window: &WindowIdent) {
