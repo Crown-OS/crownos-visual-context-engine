@@ -1,7 +1,7 @@
 # 01: Research
 
-Tags: **[V]** verified from source or official docs · **[R]** reported by a secondary source · **[A]** assumption or design inference.
-Snapshot date: 2026-11-08.
+Tags: **[V]** verified from source or official docs · **[V vendor]** verified source, vendor's own benchmark · **[R]** reported by a secondary source · **[A]** assumption or design inference · **[A, derived]** our calculation, not measured.
+Snapshot date: 2026-11-08. Section 4 adds the approach research of 2026-11-23.
 
 - Reference repos were cloned and read at these commits: screenpipe `32e9049`, aw-server-rust, awatcher, openrecall, sqlite-vec, Smithay `master@65aa86f`, niri `da0ab81`, cosmic-comp `46b26e6`.
 - CrownOS repos were read in place under `/e/CrownOS/`.
@@ -213,17 +213,21 @@ Rules:
 
 **Platform facts**
 - The `atspi` crate 0.30.0 (odilia-app) is zbus-based, async, and mature [V].
-- Apps build accessibility trees when `org.a11y.Status.IsEnabled` is true [V].
-- Chromium and Electron also accept `--force-renderer-accessibility` and the `ACCESSIBILITY_ENABLED` environment variable [V].
+- Qt6, Chromium and Firefox build accessibility trees when `org.a11y.Status.IsEnabled` is true [V]. Chromium reads it only at startup [V].
+- GTK4 ignores `IsEnabled`. It always connects to the bus and emits every event once any listener is registered [V].
+- Chromium and Electron also accept the `ACCESSIBILITY_ENABLED` environment variable [V]. A bare `--force-renderer-accessibility` forces the "complete" mode, so VCGE does not use it [V].
 - Newton, the Wayland-native accessibility work, is not production ready; the last status post is from 2024 [V].
 
 **Coverage**
-- Good: GTK3/4, Qt5/6, Firefox, Chromium/Electron (with the flag).
+- Good: GTK3/4, Qt5/6, Firefox, Chromium/Electron (when `IsEnabled` is set before they start).
 - Poor: most terminals, Flutter, Java without the bridge, and games [R].
 
-**Strategy [A]**
-- Event-driven only. Subscribe to `object:state-changed:focused`, `object:text-changed:*`, `document:load-complete`, `window:activate` and accessible-name changes.
-- Fetch only the focused subtree, with a node budget of about 2,000 nodes and depth 12. Never walk whole trees: each call is a D-Bus round trip, and browser pages can hold 10⁴–10⁵ nodes.
+**Strategy [A]** (decision b, 2026-11-23; comparison in [§4.2](#42-b-session-wide-accessibility))
+- Set `IsEnabled=true` session-wide at session start, before any app launches.
+- Event-driven. Subscribe only to focus, `window:activate`, `document:load-complete`, accessible-name changes and `object:text-changed`.
+- Fetch text with `Collection.GetMatches` (Qt6, ATK bridge), `Cache.GetItems` (GTK4), or else a concurrent bounded walk (≤ 2,000 nodes, 200 ms per app). Never walk whole trees one call at a time: each call is a D-Bus round trip, and browser pages can hold 10⁴–10⁵ nodes.
+- Chromium call allowlist: role, name, state, children, `Text.GetText(0,-1)`, document attributes. Never line or word boundaries, extents, `GetAttributes` or `GetRelationSet`, because they raise Chromium's accessibility mode.
+- Filter by the SHOWING/VISIBLE states, so off-screen text is not collected.
 - Skip `Role::PasswordText` nodes. A password-role focus also notifies the compositor so it marks the window sensitive.
 - Map an accessibility app to a compositor window by **pid plus title**. Wayland gives no global coordinates, so extents are unreliable.
 - Browser URL sources, in order: the `DocURL` document attribute [R, verify per version], then an optional native-messaging extension, then the title.
@@ -280,7 +284,7 @@ The full matrix is in [04-inference.md](04-inference.md). Key verified points:
 
 **Intel**
 - [linux-npu-driver](https://github.com/intel/linux-npu-driver/releases) v1.38 and OpenVINO 2026.4.1 support LNL, ARL and PTL NPUs [V].
-- NPU LLM decode is weak (about 2 tok/s on 1B), so use the NPU for static-shape encoders [R].
+- NPU LLM decode figures conflict: about 2 tok/s on 1B in one report, 16–36 tok/s in others ([§4.3](#43-c-a-swappable-model-layer)) [R]. Until the bake-off, use the NPU for static-shape encoders.
 
 **AMD**
 - `amdxdna` is mainline since 6.14 [V].
@@ -293,7 +297,87 @@ The full matrix is in [04-inference.md](04-inference.md). Key verified points:
 - NVFP4 can be slower than FP8 on SM121 [R].
 
 **Rust stack**
-- `ort` 2.0.0-rc.15 (ORT 1.31) [V]. CrownOS currently pins `=2.0.0-rc.12` with `load-dynamic` [V]; plan an aligned bump.
-- `llama-cpp-2` 0.1.16x [V].
+- `ort` 2.0.0-rc.15 (ORT 1.31) [V]. There is no CrownOS-wide pin: crowndictator uses rc.15 with static CUDA, crownos-voice uses rc.12 with `load-dynamic` [V]. VCGE starts on rc.15 with `load-dynamic`.
+- `llama-cpp-2` 0.1.161, with the `dynamic-backends` and `mtmd` features [V].
 - `fastembed`, `oar-ocr` (PP-OCR on ORT), `image_hasher`, `usearch` [V].
 - mistral.rs: CUDA-only alternative. Candle: no Vulkan or NPU [V].
+
+---
+
+## 4. 2026-11-23 approach research
+
+The user answered the open decisions on 2026-11-23. Three research passes compared approaches for each answer. This section summarises them. **No number here was measured on CrownOS hardware.** Vendor numbers and our own estimates are marked.
+
+### 4.1 a. Analyse each capture, then delete it
+
+| Approach | Speed | Accuracy | Verdict |
+|---|---|---|---|
+| PP-OCRv6 det tiny + rec small on `ort`, changed crops only | Full 1080p frame 0.2–0.8 s on CPU [V vendor] | Recogniser 81.3 on the vendor set, not UI text [V vendor] | Primary candidate |
+| Tesseract 5 | ~1.1 s per 1080p screenshot [R] | Beat PaddleOCR on one light screenshot (N=1) [R] | Bake-off candidate |
+| Small VLM transcribes everything | 10–30 s per dense window on an iGPU [A, derived] | Drops or invents small text [R] | Rejected for text |
+| Small VLM, short JSON caption on low-text frames | ~1 s on RTX, 4–6 s on an iGPU [A, derived] | Good for images, video, canvas [R] | Added, gated |
+| OmniParser `icon_detect_v3` | 0.6–0.8 s on a GPU [V vendor] | UI grounding, not text | dGPU-only option, later |
+
+Findings:
+- A VLM that transcribes a window is limited by decode speed, so its time grows with the amount of text. OCR scales with the number of lines [A].
+- No public OCR benchmark on UI or screen text was found. The `bench-ocr` CER gate is the only real decider.
+- Excluded by licence: Surya (OpenRAIL-M with a revenue cap), Moondream 3, the OmniParser v1/v2 detector (AGPL). MiniCPM-V has conflicting licence metadata [R].
+- Frame memory: a memfd sealed with `F_SEAL_WRITE` fails while a writable mapping exists; use `F_SEAL_FUTURE_WRITE|SHRINK|GROW` [R, man page]. `mlock` does not keep pages out of the hibernation image, so a logind `PrepareForSleep` inhibitor is needed [R]. The kernel default memlock limit (~8 MiB) is below one 1440p frame (14.7 MB) [R].
+- dmabuf zero-copy brings no gain at ≤ 3 captures per minute, and our CPU code cannot zero device buffers [A].
+
+Sources: [PP-OCRv6 docs](https://www.paddleocr.ai/v3.7.0/en/version3.x/algorithm/PP-OCRv6/PP-OCRv6.html) · [PP-OCRv6 paper](https://arxiv.org/html/2606.13108) · [RapidOCR + PP-OCRv6 timing](https://dev.to/kiarina/testing-japanese-and-english-ocr-with-pp-ocrv6-small-and-rapidocr-39pd) · [oar-ocr](https://docs.rs/crate/oar-ocr) · [Windrecorder OCR benchmark](https://github.com/yuka-friends/Windrecorder/blob/main/__assets__/third_party_ocr_engine_benchmark_reference.md) · [Surya licence](https://raw.githubusercontent.com/datalab-to/surya/HEAD/README.md) · [Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B) · [Qwen3-VL-2B GGUF](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF) · [OmniParser v2](https://huggingface.co/microsoft/OmniParser-v2.0) · [llama.cpp Vulkan results](https://github.com/ggml-org/llama.cpp/discussions/10879) · [llama.cpp issue #22582 (82 s CPU image encode)](https://github.com/ggml-org/llama.cpp/issues/22582) · [screenpipe](https://github.com/screenpipe/screenpipe) · [memfd_secret(2)](https://man7.org/linux/man-pages/man2/memfd_secret.2.html) · [CUDA external memory interop](https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__EXTRES__INTEROP.html)
+
+### 4.2 b. Session-wide accessibility
+
+| Approach | Cost | Who uses it |
+|---|---|---|
+| Periodic bounded tree walk | One D-Bus round trip per property; walks off-screen content | screenpipe [V] |
+| Event-driven + focused-subtree fetch | Near zero when idle; a sequential 2,000-node fetch takes 0.4–1.6 s [A, derived], so requests must run concurrently | Orca, Odilia [V] |
+| `Collection.GetMatches` | One call; the app filters in-process | Qt6, ATK bridge (GTK3, Chromium); not GTK4 [V] |
+| `Cache.GetItems` | One call per app; large for big apps | GTK4, Qt, ATK bridge [V] |
+| OCR only | Inference cost, no app overhead | baseline |
+
+Findings:
+- GTK4 ignores `IsEnabled` and emits all events once any listener exists [V]. Qt6 limits events to the registered types [V]. Chromium reads `IsEnabled` only at startup and raises its mode by which calls a client makes [V]. Firefox caches the whole tree in the parent process since version 113 [V].
+- Pick: event-driven, then `GetMatches` / `GetItems` / a concurrent bounded walk by toolkit, with a Chromium call allowlist.
+- No published CPU or RAM cost per toolkit on Linux. The `bench-a11y` protocol measures it (gate: ≤ 5 % CPU, ≤ 10 % PSS above "off").
+- `odilia-cache` pins an old `atspi`; copy its design instead of depending on it [V].
+
+Sources: [Chromium ax_mode.h](https://chromium.googlesource.com/chromium/src/+/lkgr/ui/accessibility/ax_mode.h) · [accessibility_switches.cc](https://chromium.googlesource.com/chromium/src/+/HEAD/ui/accessibility/accessibility_switches.cc) · [browser_accessibility_state_impl_auralinux.cc](https://chromium.googlesource.com/chromium/src/+/HEAD/content/browser/accessibility/browser_accessibility_state_impl_auralinux.cc) · [Chromium accessibility performance](https://developer.chrome.com/blog/chromium-accessibility-performance) · [GTK a11y source](https://gitlab.gnome.org/GNOME/gtk/-/tree/main/gtk/a11y) · [Qt AT-SPI source](https://github.com/qt/qtbase/tree/dev/src/gui/accessible/linux) · [Firefox Platform.cpp](https://hg.mozilla.org/mozilla-central/file/tip/accessible/atk/Platform.cpp) · [Firefox 113 a11y](https://blog.mozilla.org/en/uncategorized/firefox-accessibility-boost/) · [at-spi2-core #85](https://gitlab.gnome.org/GNOME/at-spi2-core/-/issues/85) · [at-spi2-core #139](https://gitlab.gnome.org/GNOME/at-spi2-core/-/issues/139) · [Orca source](https://gitlab.gnome.org/GNOME/orca/-/tree/main/src/orca) · [atspi crate](https://docs.rs/crate/atspi/latest) · [odilia-cache](https://docs.rs/odilia-cache/0.3.0/src/odilia_cache/lib.rs.html)
+
+### 4.3 c. A swappable model layer
+
+| Approach | Fit |
+|---|---|
+| `ort` 2.0.0-rc.15 (`load-dynamic`) | Fixed graphs: OCR, embeddings, rerank, ASR on CUDA/TensorRT, OpenVINO, VitisAI, MIGraphX, CPU [V] |
+| `llama-cpp-2` 0.1.161 (`dynamic-backends`, `mtmd`) | Only Rust path with CUDA + Vulkan + ROCm + CPU, VLMs, raw RGB input and JSON-schema grammar [V] |
+| mistral.rs | Fast on CUDA; no Vulkan or ROCm, so no iGPU tier [V] |
+| onnxruntime-genai | No Rust bindings; weak VLM coverage [R] |
+| OpenAI-compatible HTTP | One adapter covers sidecars, LAN and cloud [A] |
+
+Findings:
+- `llama-cpp-2` 0.1.161 `dynamic-backends` sets `GGML_BACKEND_DL` and `GGML_CPU_ALL_VARIANTS` [V]. `llama-cpp-sys-2` has no OpenVINO option [V].
+- Abstraction pattern: ML Kit's task API over a generic generator, rig-style capability traits, and the crownos-voice probe pattern.
+- Embeddings (MTEB v2 mean, from the model cards): Qwen3-Embedding-0.6B 64.33 multilingual; EmbeddingGemma-300m 61.15 (Gemma licence); bge-m3 59.56 (MIT) [V vendor].
+- Intel NPU LLM decode figures conflict (2 vs 16–36 tok/s) [R]. The bake-off decides.
+- No public numbers were found for the candidate VLMs on the target hardware. The bake-off measures them.
+
+Sources: [llama.cpp multimodal](https://raw.githubusercontent.com/ggml-org/llama.cpp/HEAD/docs/multimodal.md) · [llama-cpp-2 features](https://docs.rs/crate/llama-cpp-2/latest/features) · [ort releases](https://github.com/pykeio/ort/releases) · [mistral.rs](https://github.com/EricLBuehler/mistral.rs) · [ORT GenAI Qwen3-VL issue](https://github.com/microsoft/onnxruntime-genai/issues/1989) · [llama.cpp OpenVINO backend](https://raw.githubusercontent.com/ggml-org/llama.cpp/HEAD/docs/backend/OPENVINO.md) · [FastFlowLM Qwen3](https://fastflowlm.com/docs/benchmarks/qwen3_results/) · [Phoronix Lemonade Vulkan vs ROCm](https://www.phoronix.com/review/lemonade-vulkan-rocm/3) · [Intel Qwen3](https://www.intel.com/content/www/us/en/developer/articles/technical/accelerate-qwen3-large-language-models.html) · [ML Kit GenAI](https://developers.google.com/ml-kit/genai) · [rig](https://docs.rs/rig_core) · [Apple guided generation](https://developer.apple.com/documentation/foundationmodels/generating-swift-data-structures-with-guided-generation.md) · [Qwen3-Embedding card](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) · [EmbeddingGemma card](https://huggingface.co/google/embeddinggemma-300m)
+
+### 4.4 d. Any app, with access control
+
+| Identity approach | Can a same-user process fake it? | Verdict |
+|---|---|---|
+| `/proc/<pid>/exe` path string (current) | Probably yes: fork-then-exec, mount namespaces [R, not tested] | Weak |
+| `SO_PEERPIDFD` + exe `(dev, ino)` of a root-owned path | Closes PID reuse and mount namespaces, not fork-then-exec [R, not tested] | Medium |
+| Per-message `SO_PASSPIDFD` on crownos-ipc | Defeats fork-then-exec; only where we own the wire [R, not tested] | Use for the Context API |
+| `wp_security_context_v1` app id | No: the sandbox engine vouches [V] | Strong |
+| Compositor- or systemd-spawned connection | No: identity is "we spawned it" [A] | Strong, for first-party daemons |
+| Portal PermissionStore | Host app ids are self-claimed; D-Bus round trip per call [V] | Store only |
+
+Findings:
+- The Context API authorizes by uid only; crownos-ipc handlers do not get the peer; `crownos_context_v1` v1 allows one binder that can pause everyone; revocation does not cut live sessions; output screencopy and screencast ignore window sensitivity [V, code read].
+- Any unsandboxed app already has screencopy, so for host apps access control is consent, not enforcement. Sandboxed apps are enforced.
+- Precedents: macOS TCC keys grants to the code signature; Android MediaProjection asks per session; KWin hashes the executable after a path-based design was bypassed [R].
+
+Sources: [LKML on /proc/pid/exe](https://lore.kernel.org/lkml/20200318115637.qffmwvtr4uqanyvc@wittgenstein/T/) · [SO_PEERPIDFD](https://lore.kernel.org/all/20230317055555.33192-1-kuniyu@amazon.com/T/) · [SO_PASSPIDFD patch](https://lore.kernel.org/lkml/20230901205145.10640-A-hca@linux.ibm.com/T/) · [security-context-v1](https://wayland.app/protocols/security-context-v1) · [PermissionStore](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.impl.portal.PermissionStore.html) · [systemd desktop environments](https://systemd.io/DESKTOP_ENVIRONMENTS/) · [KWin D22571](https://phabricator.kde.org/D22571) · [Yama](https://docs.kernel.org/admin-guide/LSM/Yama.html) · [Android MediaProjection](https://developer.android.com/media/grow/media-projection) · [Windows GraphicsCaptureAccess](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.graphicscaptureaccess?view=winrt-20348)

@@ -27,23 +27,25 @@ VCGE aims well below Screenpipe because of three choices:
 | OCR invocations | ≤ captures; typically 0.3–2 per minute (crop + line cache) | metrics |
 | OCR latency | p95 < 300 ms per capture (changed crops only) on T2–T5, < 800 ms on T1 | metrics |
 | LLM calls | ≤ 200 per day (T2–T5), ≤ 60 per day (T1); batched | metrics |
-| VLM calls | ≤ 6 per hour and ≤ 50 per day | metrics |
+| VLM calls (capture time, low-text frames) | ≤ 6 per hour and ≤ 50 per day on T1–T3; on T4 limited only by the low-text gate | metrics |
+| Frames dropped unanalysed | `frame_dropped_unanalysed` ≈ 0 during normal work | metrics |
+| Pixels on disk | **0 bytes**, always | scan of the state dir, `/tmp`, `$XDG_RUNTIME_DIR` and swap after a 1-hour capture run |
 | Event → working-memory update | p99 < 50 ms | trace spans |
-| Capture → text searchable | p95 < 5 s on AC; ≤ 2 min on battery (deferred) | trace spans |
+| Capture → text searchable | p95 < 5 s on AC and on battery (OCR runs at capture time on both) | trace spans |
 | Segment close → episodic memory with summary | p95 < 2 min on AC | trace spans |
 | Hybrid search, interactive | p95 < 150 ms without rerank, < 400 ms with rerank (1 year of data) | criterion + synthetic corpus |
 | Startup, contextd | < 300 ms to socket ready; < 1 s to first context event | systemd-analyze, traces |
 | Startup, inferd | < 1.5 s with OCR and embedding warm on CPU; NPU graphs loaded from cache < 2 s | traces |
-| Storage | 15–50 MB per day text-only; 80–250 MB per day with thumbnails; default quota 10 GB | `du`, DB stats |
+| Storage | 15–50 MB per day (text only; no pixels are stored); default quota 10 GB | `du`, DB stats |
 
 ## 12.2 Tier profiles
 
 | Profile | Tiers | Capture cadence | OCR | Embeddings | LLM/VLM | inferd memory (resident / peak) |
 |---|---|---|---|---|---|---|
-| **Low-end** | T1 (CPU only, 8–16 GB) | Triggers only; idle backstop 120 s | PP-OCRv6 tiny, CPU, 1 thread | MiniLM, CPU | Batched when on AC and idle; no local VLM; cloud or LAN only with consent | 350 MB / 1.6 GB |
-| **AI PC (integrated)** | T2 Intel/AMD, T3 Snapdragon | Full trigger set; idle backstop 60 s | NPU (Intel/AMD) or CPU (Snapdragon) | NPU or CPU | 2–4B on the integrated GPU via Vulkan; VLM shares the same model | 900 MB / 4.5 GB |
-| **Dedicated GPU** | T4 NVIDIA | Full; yields to games | CUDA/TRT | CUDA | 9B on CUDA; unloaded when a game starts or VRAM is under pressure | 1 GB RAM + 2 GB VRAM / +9 GB VRAM |
-| **Workstation and LAN node** | T5 DGX Spark | Full | CUDA | CUDA | 27–35B class; also serves offload for paired laptops | ≤ 24 GB |
+| **Low-end** | T1 (CPU only, 8–16 GB) | Triggers only; idle backstop 120 s | PP-OCRv6 tiny/small, CPU, 2 threads | MiniLM, CPU | LLM batched when on AC and idle. VLM caption off by default; on AC a small model (≤ 64 tokens). Text to LAN or cloud only with consent | 350 MB / 1.6 GB |
+| **AI PC (integrated)** | T2 Intel/AMD (T3 Snapdragon: future track) | Full trigger set; idle backstop 60 s | NPU (Intel/AMD) or CPU | NPU or CPU | 2–4B on the integrated GPU via Vulkan; the capture-time VLM shares the same model, on AC only | 900 MB / 4.5 GB |
+| **Dedicated GPU** | T4 NVIDIA | Full; yields to games | CUDA/TRT | CUDA | 9B LLM on CUDA. 4B VLM resident while captures are active. Both unload when a game starts or VRAM is under pressure | 1 GB RAM + 2 GB VRAM / +9 GB VRAM |
+| **LAN node** | T5 DGX Spark, reached over HTTP | — (no capture on the node) | — | — | 27–35B class behind llama-server; serves text tasks for paired laptops | ≤ 24 GB |
 
 ## 12.3 Adaptive processing (scheduler policy)
 
@@ -51,9 +53,9 @@ Each resource tier gets its own token bucket: captures, OCR, embedding, LLM, VLM
 
 | Signal | Effect |
 |---|---|
-| On battery | ×0.3. LLM, VLM and consolidation are deferred until AC power; idle backstop rises to 300 s |
+| On battery | ×0.3. OCR still runs at capture time on the NPU or CPU. The capture-time VLM is skipped (it is not deferred, because the frame is deleted). LLM summaries and consolidation are deferred until AC power; idle backstop rises to 300 s |
 | `power-profiles-daemon` set to `power-saver` | ×0.2. Only metadata and accessibility text are collected; captures are limited to focus changes |
-| CPU PSI `some avg10` > 40%, or memory PSI > 10% | Pause OCR, LLM and VLM; queues coalesce |
+| CPU PSI `some avg10` > 40%, or memory PSI > 10% | No new captures (the trigger gate defers them). LLM and VLM pause. Frames already queued keep their 60 s TTL; text queues coalesce |
 | Thermal headroom low (the vendor zone passes its trip point) | ×0.5 |
 | A fullscreen surface, or `content_type` = game or video | Stop captures for it; GPU jobs paused; LLM model unloaded if it is on the same GPU |
 | User idle more than 5 minutes, on AC | Consolidation window opens. It is abortable within 100 ms when input returns |
@@ -62,7 +64,7 @@ Each resource tier gets its own token bucket: captures, OCR, embedding, LLM, VLM
 
 **Coalescing rules:**
 - For captures, the latest request wins per window.
-- OCR jobs older than their deadline are dropped. The next capture covers the same content.
+- The frame queue is RAM only: at most 3 frames and 64 MB, 60 s TTL. An expired frame is dropped, zeroed and counted as `frame_dropped_unanalysed`. It is never written to disk and never retaken later.
 - Segment summarization batches up to 8 segments into one call.
 - Embeddings are batched up to 32.
 
@@ -73,6 +75,8 @@ Each resource tier gets its own token bucket: captures, OCR, embedding, LLM, VLM
 | `bench-ocr`: a corpus of 500 screenshot crops (code, docs, chat, terminal, UI, CJK, dark mode). Measures character error rate and latency per execution provider and per tier | criterion + a custom harness | CER ≤ 3% on UI and code text; latency within the targets above |
 | `bench-embed`: retrieval recall@10 on a synthetic "day in the life" corpus, plus throughput per EP | harness | recall@10 ≥ 0.85 |
 | `bench-llm`: JSON validity rate, extraction F1 against a gold set, tokens/s per backend | harness | ≥ 99% valid JSON; entity F1 ≥ 0.7 |
+| `bench-vlm`: caption latency and VRAM per runtime and device (RTX 4050 CUDA, 780M Vulkan, CPU) on low-text frames | harness | latency within the [04 §10.6](04-inference.md#106-generative-call-design-keeps-llm-usage-rare) budgets |
+| `bench-a11y`: 10-minute scripted workload in gnome-text-editor, Kate, Chromium, VS Code and Firefox, in four states (off / enabled with no listener / listeners / reads) | PSS + cgroup `cpu.stat` | ≤ 5% CPU and ≤ 10% PSS above "off" |
 | `bench-compositor`: frame-time jitter with the context module on vs off, input event latency | presentation-time traces | no regression beyond the targets |
 | `soak-8h`: scripted workload (browser, editor, terminal, chat, video), replayed from traces plus real apps | headless compositor plus nested session | every target in §12.1 |
 | `bench-search`: 1-year synthetic store (110k segments, 5M text lines) | criterion | p95 targets |

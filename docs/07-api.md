@@ -6,13 +6,36 @@ Tags: **[V]** verified · **[A]** design decision.
 
 | Interface | Transport | Peers |
 |---|---|---|
-| `crownos_context_v1`, `crownos_capture_privacy_v1` | Wayland (custom XML in crownos-protocols) | crownpositor ↔ contextd; any app → compositor (privacy) |
+| `crownos_context_v1` (version 2), `crownos_capture_privacy_v1` | Wayland (custom XML in crownos-protocols) | crownpositor ↔ any granted client, many at once, each with its own scope; any app → compositor (privacy) |
 | `ext-image-copy-capture-v1`, `ext-foreign-toplevel-list-v1` | Wayland (standard, already implemented [V]) | crownpositor ↔ contextd |
-| **Context API** `crownos-visual-context` | **crownos-ipc**: Unix socket `$XDG_RUNTIME_DIR/crownos/crownos-visual-context.sock`, 20-byte header, postcard payloads, SO_PEERCRED auth, ≤ 16 fds via SCM_RIGHTS, Request/Reply/Notify/Subscribe/Event kinds, signature-hashed selectors [V] | contextd ↔ shell, agents, CLI, Inspector, crownbar |
-| Inference API `crownos-visual-context-infer` | crownos-ipc; bulk payloads (images, text batches) in **sealed memfds** | contextd ↔ inferd (only contextd's uid+exe allowed) |
-| Relay API `crownos-visual-context-relay` | crownos-ipc | contextd ↔ relayd |
+| **Context API** `crownos-visual-context` | **crownos-ipc**: Unix socket `$XDG_RUNTIME_DIR/crownos/crownos-visual-context.sock`, 20-byte header, postcard payloads, ≤ 16 fds via SCM_RIGHTS, Request/Reply/Notify/Subscribe/Event kinds, signature-hashed selectors [V]. Peer identity: `SO_PEERPIDFD` → `AppKey`, opt-in `SO_PASSPIDFD` per message, scope check per request ([05 §11.3](05-privacy-security.md#113-caller-identity-and-scopes)) | contextd ↔ any granted app: shell, agents, CLI, Inspector, crownbar |
+| Inference API `crownos-visual-context-infer` | crownos-ipc; bulk payloads (frames, text batches) in **sealed memfds** | contextd ↔ inferd (only `spawned:crown-contextd` allowed) |
+| Relay API `crownos-visual-context-relay` | crownos-ipc; text only | contextd ↔ relayd, which hosts the OpenAI-compatible HTTP backend (sidecars, LAN, cloud) |
 | Agent bridge | MCP over Unix socket (rmcp, as `crownui/mcp` [V]) | agents ↔ crown-context-mcp ↔ Context API |
 | Upstream services | crownos-ipc clients of `crownotify` (+ new `NotificationPosted`), `crownos-clipboard`; zbus for AT-SPI, UPower, power-profiles | contextd |
+
+### 13.1.1 `crownos_context_v1` version 2
+
+Version 1 allowed one binder, and that binder could pause everyone [V]. Version 2 opens the global to any app and moves the decision to the grant ([05 §11.3](05-privacy-security.md#113-caller-identity-and-scopes)). The interface names stay the same; the XML is `crownos-protocols/protocols/crownos-context-v1.xml` with the version raised to 2.
+
+```
+crownos_context_manager_v1                (global, version 2, any client)
+  ── new events ──
+  revoked                                  # grant removed; the object is inert from now on
+  ── changed requests ──
+  set_paused(uint paused)                  # pauses only this client's stream,
+                                           # unless the client holds `engine`
+crownos_context_window_v1
+  flag_sensitive(uint reason, uint duration_ms)
+                                           # open to every bound client; rate-limited;
+                                           # it can only add privacy
+```
+
+Rules:
+- Many clients can bind at once. The compositor resolves each client's `AppKey` at accept, checks it again at bind, and keeps a `Bound` entry with its scope.
+- With no grant, the bind is parked and the user gets the first-use prompt.
+- Events are filtered per client. A `metadata` client gets no `title` and no `selection` events.
+- On a config reload, the compositor recomputes every scope. A client that lost its grant gets `revoked`.
 
 Wire contract lives in crate `context-protocol` (lib, `default-features = false`, no daemon deps) — the convention used by crownos-clipboard / crownotify / voice-protocol [V]. Postcard is positional: **new fields are only appended**; breaking changes bump the service name suffix (`…-v2`).
 
@@ -30,34 +53,36 @@ Redaction     = summary_only | snippets | raw          # max level is set by cal
 
 ## 13.3 Context API (`crownos-visual-context`, v1)
 
+The wire format stays v1. Only the authorizer changes: each request is checked against the caller's scopes.
+
 | Method | Kind | Scope | Request → Response |
 |---|---|---|---|
-| `status()` | req | any granted | → `{ state: observing\|paused\|degraded, pause_reason?, tier, backends, capture_active, queue_depths }` |
-| `current_context()` | req | `context.current` | → `CurrentContext` |
-| `search(SearchQuery)` | req | `context.search` (`raw` for raw) | → `SearchResults` |
-| `timeline(TimelineQuery)` | req | `context.search` | → `Timeline` |
-| `episode(EpisodeId)` | req | `context.search` | → `Episode` with segments |
-| `project(ProjectRef)` | req | `context.search` | → `ProjectMemory` |
-| `resume_context(ProjectRef)` | req | `context.search` | → `ResumeContext` ("where you left off") |
-| `entity(EntityRef)` | req | `context.search` | → `EntityCard` (aliases, facts valid now, neighbors ≤ 2 hops, recent episodes) |
-| `context_pack(ContextPackRequest)` | req | `context.search` | → `ContextPack` (for agent prompt injection) |
-| `procedures(ProcedureFilter)` | req | `context.search` | → `[Procedure]` |
-| `preferences(scope)` | req | `context.search` | → `[Preference]` |
-| `explain(MemoryRef)` | req | `context.search` | → evidence chain |
-| `remember(MemoryAssertion)` | req | `memory.write` | → `MemoryRef` (user/agent-asserted fact/preference/note; source=user\|agent) |
-| `correct(MemoryRef, Correction)` | req | `memory.write` | → new `MemoryRef` (old invalidated, never overwritten) |
-| `forget(ForgetRequest)` | req | `memory.delete` | → `{ deleted_counts, cascaded_counts }` |
-| `pause(duration?)` / `resume()` | notify | `policy.admin` or shell | — |
-| `set_policy(PolicyPatch)` | req | `policy.admin` | → `Policy` (also persisted to `visual_context.ron`) |
-| `export(ExportRequest)` | req | `context.raw` | fd → memfd/file with JSONL + media (open format) |
-| `subscribe(Topics)` | subscribe | per topic | events below |
+| `status()` | req | any scope | → `{ state: observing\|paused\|degraded, pause_reason?, tier, backends, capture_active, queue_depths }` |
+| `current_context()` | req | `metadata` (titles, `doc_key` and entities need `text`) | → `CurrentContext` |
+| `search(SearchQuery)` | req | `text` (`raw` for raw) | → `SearchResults` |
+| `timeline(TimelineQuery)` | req | `text` | → `Timeline` |
+| `episode(EpisodeId)` | req | `text` | → `Episode` with segments |
+| `project(ProjectRef)` | req | `text` | → `ProjectMemory` |
+| `resume_context(ProjectRef)` | req | `text` | → `ResumeContext` ("where you left off") |
+| `entity(EntityRef)` | req | `text` | → `EntityCard` (aliases, facts valid now, neighbors ≤ 2 hops, recent episodes) |
+| `context_pack(ContextPackRequest)` | req | `text` | → `ContextPack` (for agent prompt injection) |
+| `procedures(ProcedureFilter)` | req | `text` | → `[Procedure]` |
+| `preferences(scope)` | req | `text` | → `[Preference]` |
+| `explain(MemoryRef)` | req | `text` | → evidence chain |
+| `remember(MemoryAssertion)` | req | `memory_write` | → `MemoryRef` (user/agent-asserted fact/preference/note; source=user\|agent) |
+| `correct(MemoryRef, Correction)` | req | `memory_write` | → new `MemoryRef` (old invalidated, never overwritten) |
+| `forget(ForgetRequest)` | req | `memory_delete` | → `{ deleted_counts, cascaded_counts }` |
+| `pause(duration?)` / `resume()` | notify | `pause` | — |
+| `set_policy(PolicyPatch)` | req | `policy_admin` | → `Policy` (also persisted to `visual_context.ron`) |
+| `export(ExportRequest)` | req | `raw` | fd → memfd/file with JSONL (open format; text and metadata only, no images) |
+| `subscribe(Topics)` | subscribe | per topic: `metadata` for state topics, `text` for topics that carry titles or text | events below |
 
 **Events:** `ContextChanged(CurrentContext)` · `SegmentClosed{segment_id, app, doc_key, label}` · `EpisodeSummarized{episode_id, title}` · `ProjectActivated{project}` · `ProcedureDetected{procedure}` · `MemoryCreated{memory_ref, kind}` · `CaptureStateChanged{state}` · `PolicyChanged`.
-Slow subscribers drop events, never stall the service (crownos-ipc semantics [V]); `ContextChanged` is coalesced (latest wins, ≤ 4 Hz).
+Slow subscribers drop events, never stall the service (crownos-ipc semantics [V]); `ContextChanged` is coalesced (latest wins, ≤ 4 Hz). A `metadata` subscriber gets `ContextChanged` with titles and text removed. When a grant is revoked, contextd drops the peer and its subscriptions.
 
 ## 13.4 Examples (JSON rendering of postcard messages, for readability)
 
-**Current context**
+**Current context** (caller with `text` scope; a `metadata` caller gets no `title`, `doc_key`, episode title or entities)
 
 ```json
 // → current_context()
@@ -70,7 +95,7 @@ Slow subscribers drop events, never stall the service (crownos-ipc semantics [V]
   "activity": { "label": "coding", "confidence": 0.91, "since": 1793101800000000 },
   "episode": { "id": 9812, "title": "Implementing context protocol fan-out", "confidence": 0.74 },
   "recent_entities": [ {"id": 7, "kind":"repository", "name":"crownpositor"},
-                       {"id": 311, "kind":"document", "name":"crownos_context_v1.xml"} ],
+                       {"id": 311, "kind":"document", "name":"crownos-context-v1.xml"} ],
   "open_documents": 6,
   "observing": true
 }
@@ -89,7 +114,7 @@ Slow subscribers drop events, never stall the service (crownos-ipc semantics [V]
               "url":"https://github.com/YaLTeR/niri/blob/main/src/screencasting/pw_utils.rs",
               "t_start": 1792950000000000, "episode_id": 9790,
               "snippet":"…damage_tracker.damage_output(1, &elements)… skip frame if None…",
-              "frame_ref": {"frame_id": 551002, "has_thumbnail": true} },
+              "frame_ref": {"frame_id": 551002} },
     "score": 0.83, "confidence": 0.95,
     "provenance": [{"source_kind":"a11y","source_id":"text_line:4410021"}] } ],
   "took_ms": 61 }
@@ -148,24 +173,27 @@ Slow subscribers drop events, never stall the service (crownos-ipc semantics [V]
 
 | Method | Payload | Result |
 |---|---|---|
-| `capabilities()` | — | tiers, backends per task, loaded models |
-| `ocr(OcrJob)` | memfd: grayscale/RGB crops + boxes, lang hints | lines `{text, bbox, conf}` per crop |
-| `embed_text(batch)` | ≤ 32 texts | int8[256] vectors + space id |
-| `embed_image(batch)` | memfd images | vectors |
+| `capabilities()` | — | tiers, runtimes and devices per task, loaded models |
+| `recognize_text(OcrJob)` | memfd: grayscale/RGB crops + boxes, lang hints | lines `{text, bbox, conf}` per crop |
+| `describe_screen(CaptionJob)` | memfd: the capture frame + app name + window title | `ScreenDescription {content_kind, caption, visible_entities[]}` or `SchemaFailure` |
+| `embed_text(batch)` | ≤ 32 texts + purpose (query or document) | int8[256] vectors + space id |
 | `rerank(query, docs)` | ≤ 30 docs | scores |
-| `generate(GenerateJob)` | prompt template id + variables + JSON schema + optional image memfd | schema-valid JSON or `SchemaFailure` |
+| `summarize_segments(batch)` | ≤ 8 segment digests (text only) | one `SegmentSummary` per segment, or `SchemaFailure` |
 | `unload(task?)` | — | — |
 
-Every job carries `{job_id, priority: interactive|normal|batch, deadline}`; inferd may reject with `Busy{retry_after}`.
+The methods are tasks of the task layer ([04 §10.4](04-inference.md#104-model-layer-in-context-infer)); none of them names a model. `generate` is a capability under the tasks, not a method here. relayd serves the same text-only tasks (`embed_text`, `rerank`, `summarize_segments`) through the HTTP backend; it never serves `recognize_text` or `describe_screen`. Every job carries `{job_id, priority: interactive|normal|batch, deadline}`; inferd may reject with `Busy{retry_after}`. Frame jobs are never retried after the frame's 60 s TTL; the frame is then dropped and counted as `frame_dropped_unanalysed`.
 
 ## 13.6 Changes to existing CrownOS interfaces
 
 | Repo | Change |
 |---|---|
-| crownos-protocols | Add `crownos_context_v1.xml`, `crownos_capture_privacy_v1.xml` |
-| crownpositor | `compositor/src/context/` module; emit plugin-host window events; sensitivity veto in capture handlers; input buckets; pause hotkey |
+| crownos-protocols | `crownos-context-v1.xml` version 2 (many binders, per-client scope, `revoked`); `crownos_capture_privacy_v1.xml` |
+| crownpositor | `compositor/src/context/` module; emit plugin-host window events; sensitivity veto in capture handlers; input buckets; pause hotkey; `AppKey` at accept and bind; `ContextState.bound: Vec<Bound>` with per-client event filtering; revoke live clients on config reload; first-use prompt through `PendingPrompts` + portal; consent dialogs ignore synthetic input; blank sensitive windows in output screencopy and screencast; set `org.a11y.Status.IsEnabled` at session start |
+| crownos-ipc | `SO_PEERPIDFD` instead of `pidfd_open`; opt-in `SO_PASSPIDFD` sender check per message; pass the peer identity into generated handlers |
+| xdg-desktop-portal-crownos | `AccessDialog` returns the choices (remember, scope); ship it in the ISO |
 | crownotify | `event NotificationPosted { id, app_name, desktop_entry, summary, body, category, urgency, t }` (appended field set) |
-| crownos-config | `visual_context` section; extend `AiConfig` backends with `Qnn`, `TensorRt`, `Vulkan` |
+| crownos-config | `visual_context` and new `context_access` sections; add `agents`, `visual_context`, `context_access` to the by-name API; split `Device` from `Runtime` in `AiConfig` and add `Vulkan`, `TensorRt`, `Rocm`, `Remote` |
 | crownbar | Context engine indicator + pause menu (subscribes to `CaptureStateChanged`) |
-| crownos-settings | Privacy pane (rules, retention, grants, cloud consent) — Phase 7+ |
-| crownos-pkgbuilds | `crownos-visual-context` (+ `-cuda`, `-vulkan` ggml backends), `onnxruntime-crownos-qnn`; **aarch64 builds** |
+| crownos-settings | New **Privacy** group: *Screen context* (enable, exclusions, private titles, retention, pause hotkey) and *App access* (grants per app, scope toggles, revoke, audit) |
+| crownos-computer-use | Move `atspi` from 0.29 to 0.30, so both share one cache design |
+| crownos-pkgbuilds | `crownos-visual-context` (+ `-cuda`, `-vulkan`, `-rocm` ggml modules). aarch64 builds and `onnxruntime-crownos-qnn` are a future track |
