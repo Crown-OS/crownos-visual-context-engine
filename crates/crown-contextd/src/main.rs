@@ -9,6 +9,7 @@ mod pipeline;
 mod shared;
 mod util;
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -19,11 +20,11 @@ use context_collect::{CompositorBridge, replay};
 use context_eval::Trace;
 use context_policy::{Policy, VisualContext};
 use context_store::{Store, Writer};
-use crownos_config::schema::ContextAccess;
+use crownos_config::schema::{ContextAccess, ContextDecision};
 use crownos_ipc::adapter::tokio::serve_with_outbox;
-use crownos_ipc::{Error as IpcError, ServiceBuilder};
+use crownos_ipc::{Caller, Error as IpcError, ServiceBuilder};
 
-use crate::access::Grants;
+use crate::access::{Grants, Parked, answer_parked, ask_in_background, caller_key};
 use crate::shared::Shared;
 use crate::util::paths::state_dir;
 
@@ -88,6 +89,7 @@ async fn main() -> Result<()> {
             let _ = events.send(pipeline::Outgoing::GrantsChanged);
         })
     };
+    let questions = events.clone();
     let pipeline = pipeline::spawn(
         observations,
         policy,
@@ -115,20 +117,42 @@ async fn main() -> Result<()> {
         service = context_protocol::SERVICE,
         "serving the Context API"
     );
-    let mut handler = api::Api::new(
+    let handler = RefCell::new(api::Api::new(
         Arc::clone(&shared),
         reader,
         writer.handle(),
         bridge,
         grants.clone(),
-    );
+    ));
+    let parked = RefCell::new(Parked::default());
     let mut outbox = outbox;
     tokio::select! {
         served = serve_with_outbox(
             &mut server,
-            |server, peer, message| context_protocol::context::dispatch_with_peer(&mut handler, server, peer, message).map(|()| true),
+            |server, peer, message| {
+                let key = server
+                    .credentials(peer)
+                    .and_then(|credentials| caller_key(Caller { peer, credentials }));
+                if let Some(key) = key.filter(|key| grants.decide(Some(key)) == ContextDecision::Ask) {
+                    if parked.borrow_mut().park(key.clone(), peer, message) {
+                        ask_in_background(key, &questions);
+                    }
+                    return Ok(true);
+                }
+                context_protocol::context::dispatch_with_peer(&mut *handler.borrow_mut(), server, peer, message).map(|()| true)
+            },
             |cx| outbox.poll_recv(cx),
-            |server, outgoing| api::send_event(server, &grants, outgoing),
+            |server, outgoing| match outgoing {
+                pipeline::Outgoing::Answered { key, answer } => answer_parked(
+                    server,
+                    &grants,
+                    &mut handler.borrow_mut(),
+                    &mut parked.borrow_mut(),
+                    &key,
+                    answer,
+                ),
+                other => api::send_event(server, &grants, other),
+            },
         ) => served.context("the Context API stopped")?,
         _ = tokio::signal::ctrl_c() => tracing::info!("stopping"),
     }

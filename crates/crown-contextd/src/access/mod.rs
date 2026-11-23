@@ -1,22 +1,32 @@
 //! Who may ask the Context API what: the grants of `context_access.ron`,
 //! checked per request against the caller's `AppKey`.
 
+mod first_use;
+mod parked;
+mod portal;
 mod redaction;
 
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
-use crownos_config::schema::{AppKey, ContextAccess, Scope, ScopeSet};
+use crownos_config::schema::{AppKey, ContextAccess, ContextDecision, Expiry, Scope, ScopeSet};
 use crownos_ipc::{Caller, RemoteError};
 
-use crate::util::caller_key::caller_key;
-
+pub(crate) use first_use::{answer_parked, ask_in_background};
+pub(crate) use parked::Parked;
+pub(crate) use portal::PortalAnswer;
 pub(crate) use redaction::redact_context;
 
 /// The grants, shared by the request handler and the event sender, and
 /// replaced when the file changes.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Grants(Arc<RwLock<ContextAccess>>);
+pub(crate) struct Grants {
+    access: Arc<RwLock<ContextAccess>>,
+    /// Answers the user gave without remembering them; they last while
+    /// contextd runs.
+    answered: Arc<RwLock<HashMap<AppKey, ScopeSet>>>,
+}
 
 /// A caller and what it may do.
 #[derive(Debug, Clone)]
@@ -67,31 +77,90 @@ impl Grants {
     }
 
     pub(crate) fn from_access(access: ContextAccess) -> Self {
-        Self(Arc::new(RwLock::new(access)))
+        Self {
+            access: Arc::new(RwLock::new(access)),
+            answered: Arc::default(),
+        }
     }
 
     pub(crate) fn replace(&self, access: ContextAccess) {
-        if let Ok(mut grants) = self.0.write() {
+        if let Ok(mut grants) = self.access.write() {
             *grants = access;
         }
     }
 
+    /// The decision for a caller; one that cannot be named is refused.
+    pub(crate) fn decide(&self, key: Option<&AppKey>) -> ContextDecision {
+        let Some(key) = key else {
+            return ContextDecision::Denied;
+        };
+        let decision = self
+            .access
+            .read()
+            .map_or(ContextDecision::Denied, |access| {
+                access.decide(key, SystemTime::now())
+            });
+        if decision != ContextDecision::Ask {
+            return decision;
+        }
+        self.answered
+            .read()
+            .ok()
+            .and_then(|answered| answered.get(key).copied())
+            .map_or(ContextDecision::Ask, ContextDecision::Granted)
+    }
+
+    /// Applies the user's answer: a remembered one is written to
+    /// `context_access.ron` with a strict load, so a broken file is never
+    /// replaced; any other one lasts while contextd runs.
+    pub(crate) fn answer(&self, key: &AppKey, scopes: Option<ScopeSet>, remember: bool) {
+        if !remember {
+            if let (Some(scopes), Ok(mut answered)) = (scopes, self.answered.write()) {
+                answered.insert(key.clone(), scopes);
+            }
+            return;
+        }
+        let mut access: ContextAccess = match crownos_config::load_strict(ContextAccess::SECTION) {
+            Ok(access) => access,
+            Err(error) => {
+                tracing::warn!(%error, "cannot remember the answer");
+                return;
+            }
+        };
+        match scopes {
+            Some(scopes) => access.grant(key, scopes, Expiry::Never),
+            None => access.deny(key),
+        }
+        if let Err(error) = crownos_config::save(ContextAccess::SECTION, &access) {
+            tracing::warn!(%error, "cannot remember the answer");
+            return;
+        }
+        self.replace(access);
+    }
+
     pub(crate) fn of_key(&self, key: Option<AppKey>) -> CallerScopes {
-        let scopes = key
-            .as_ref()
-            .and_then(|key| {
-                self.0
-                    .read()
-                    .ok()
-                    .map(|grants| grants.scopes_for(key, SystemTime::now()))
-            })
-            .unwrap_or_default();
+        let scopes = match self.decide(key.as_ref()) {
+            ContextDecision::Granted(scopes) => scopes,
+            ContextDecision::Ask | ContextDecision::Denied => ScopeSet::EMPTY,
+        };
         CallerScopes { key, scopes }
     }
 
+    /// The scopes of a caller, named by the program it ran when it
+    /// connected. A caller whose program could not be read then has none.
     pub(crate) fn of(&self, caller: Caller<'_>) -> CallerScopes {
-        self.of_key(caller_key(caller.credentials))
+        self.of_key(caller_key(caller))
     }
+}
+
+/// The key of a caller, from the program crownos-ipc read at accept.
+pub(crate) fn caller_key(caller: Caller<'_>) -> Option<AppKey> {
+    let program = caller.credentials.program.as_ref()?;
+    AppKey::of_program(
+        &program.executable,
+        &program.arguments,
+        program.working_directory.as_deref(),
+    )
 }
 
 #[cfg(test)]
@@ -142,5 +211,21 @@ mod tests {
         let grants = grants_for(&agent, vec![Scope::Metadata]);
         grants.replace(ContextAccess::default());
         assert!(grants.of_key(Some(agent)).require_any().is_err());
+    }
+
+    #[test]
+    fn an_answer_without_remembering_lasts_while_contextd_runs() {
+        let agent = AppKey::Spawned {
+            component: "agent".to_owned(),
+        };
+        let grants = Grants::from_access(ContextAccess::default());
+        assert_eq!(grants.decide(Some(&agent)), ContextDecision::Ask);
+        let metadata = ScopeSet::EMPTY.with(Scope::Metadata);
+        grants.answer(&agent, Some(metadata), false);
+        assert_eq!(
+            grants.decide(Some(&agent)),
+            ContextDecision::Granted(metadata)
+        );
+        assert_eq!(grants.decide(None), ContextDecision::Denied);
     }
 }

@@ -34,6 +34,8 @@ pub enum BridgeError {
     Dispatch(#[from] DispatchError),
     #[error("cannot start the bridge thread: {0}")]
     Thread(#[from] std::io::Error),
+    #[error("the compositor withdrew the grant of this engine")]
+    Revoked,
 }
 
 const RETRY: Duration = Duration::from_secs(3);
@@ -110,6 +112,9 @@ fn run_once(outlet: &Outlet, stop: &AtomicBool, connected: &AtomicBool) -> Resul
     tracing::info!("bound crownos_context_manager_v1");
     while !stop.load(Ordering::Relaxed) {
         queue.blocking_dispatch(&mut state)?;
+        if state.is_revoked() {
+            return Err(BridgeError::Revoked);
+        }
         if state.outlet_closed() {
             break;
         }

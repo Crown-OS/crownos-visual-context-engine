@@ -14,6 +14,9 @@ use crownos_ipc::{Error, RemoteError};
 
 const TIMEOUT: Option<Duration> = Some(Duration::from_secs(5));
 const STARTUP: Duration = Duration::from_secs(30);
+/// No portal can be reached, so a first-use question fails at once instead
+/// of opening a dialog on the user's screen.
+const NO_SESSION_BUS: &str = "unix:path=/nonexistent/bus";
 
 struct KilledOnDrop(Child);
 
@@ -44,7 +47,7 @@ fn wait_until(what: &str, mut ready: impl FnMut() -> bool) -> anyhow::Result<()>
 
 #[test]
 fn a_caller_gets_its_grant_and_loses_the_connection_with_it() -> anyhow::Result<()> {
-    let scratch = PathBuf::from(format!("/tmp/w1b-ctxd-{}", std::process::id()));
+    let scratch = PathBuf::from(format!("/tmp/w1b-ctxd-{}-grant", std::process::id()));
     let config = scratch.join("config");
     let state = scratch.join("state");
     let sockets = scratch.join("rt");
@@ -67,6 +70,7 @@ fn a_caller_gets_its_grant_and_loses_the_connection_with_it() -> anyhow::Result<
             .arg(&sockets)
             .env("CROWN_CONFIG_DIR", &config)
             .env("XDG_RUNTIME_DIR", &sockets)
+            .env("DBUS_SESSION_BUS_ADDRESS", NO_SESSION_BUS)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?,
@@ -105,6 +109,52 @@ fn a_caller_gets_its_grant_and_loses_the_connection_with_it() -> anyhow::Result<
     })
     .context("the daemon kept a caller whose grant is gone")?;
 
+    let _ = std::fs::remove_dir_all(&scratch);
+    Ok(())
+}
+
+#[test]
+fn a_caller_without_a_grant_waits_for_the_question_and_gets_a_clear_refusal() -> anyhow::Result<()>
+{
+    let scratch = PathBuf::from(format!("/tmp/w1b-ctxd-{}-ask", std::process::id()));
+    let config = scratch.join("config");
+    let state = scratch.join("state");
+    let sockets = scratch.join("rt");
+    for directory in [&config, &state, &sockets] {
+        std::fs::create_dir_all(directory)?;
+    }
+    let trace = scratch.join("trace.json");
+    std::fs::write(&trace, r#"{"seed":0,"observations":[],"gold":[]}"#)?;
+    std::fs::write(
+        config.join("context_access.ron"),
+        "(migrated_agents: true)\n",
+    )?;
+
+    let _daemon = KilledOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_crown-contextd"))
+            .arg("--replay")
+            .arg(&trace)
+            .arg("--state-dir")
+            .arg(&state)
+            .arg("--socket-dir")
+            .arg(&sockets)
+            .env("CROWN_CONFIG_DIR", &config)
+            .env("XDG_RUNTIME_DIR", &sockets)
+            .env("DBUS_SESSION_BUS_ADDRESS", NO_SESSION_BUS)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?,
+    );
+    let socket = sockets.join(format!("{}.sock", context_protocol::SERVICE));
+    wait_until("the context socket", || socket.exists())?;
+
+    let mut client = Client::connect_in(&sockets)?;
+    match client.call_blocking::<status>(&status {}, Vec::new(), TIMEOUT) {
+        Err(Error::Remote(error))
+            if error.code == RemoteError::UNAUTHORIZED
+                && error.message.contains("nobody answered") => {}
+        other => bail!("a caller without a grant got {other:?}"),
+    }
     let _ = std::fs::remove_dir_all(&scratch);
     Ok(())
 }

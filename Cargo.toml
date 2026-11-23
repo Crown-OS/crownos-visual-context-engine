@@ -53,6 +53,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 tracing-journald = "0.3"
 clap = { version = "4.6", features = ["derive"] }
 getrandom = { version = "0.3", features = ["std"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

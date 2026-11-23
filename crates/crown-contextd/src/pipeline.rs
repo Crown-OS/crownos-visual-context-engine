@@ -29,6 +29,11 @@ pub(crate) enum Outgoing {
     Segment(SegmentView),
     /// `context_access.ron` changed: callers whose grant is gone are dropped.
     GrantsChanged,
+    /// The user answered the first-use question for `key`, or nobody did.
+    Answered {
+        key: crownos_config::schema::AppKey,
+        answer: Option<crate::access::PortalAnswer>,
+    },
 }
 
 pub(crate) struct Pipeline {

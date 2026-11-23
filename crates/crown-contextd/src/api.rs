@@ -100,6 +100,7 @@ pub(crate) fn send_event(server: &mut Server, grants: &Grants, outgoing: Outgoin
         Outgoing::Segment(segment) => server.emit_where(&SegmentClosed { segment }, |caller| {
             grants.of(caller).scopes.contains(Scope::Text)
         }),
+        Outgoing::Answered { .. } => Ok(()),
         Outgoing::GrantsChanged => {
             let dropped = server.drop_peers_where(|caller| grants.of(caller).scopes.is_empty());
             if !dropped.is_empty() {
