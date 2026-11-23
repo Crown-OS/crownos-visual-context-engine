@@ -1,12 +1,14 @@
 //! [`ScreenModels`] over crown-context-inferd. A region copy goes over as a sealed memfd in
 //! `XRGB8888`, so no pixel is converted or copied again on the way.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use context_infer::{InferError, Job, PixelFormat, Priority};
 use context_infer_client::{InferdClient, SealedFrame};
 
+use crate::cancellation::ModelCall;
 use crate::geometry::Rect;
 use crate::region_copy::RegionCopy;
 use crate::screen_models::{ModelError, RecognizedLine, ScreenModels, ScreenSummary};
@@ -25,26 +27,36 @@ impl InferScreenModels {
         }
     }
 
-    /// Runs `call` once, and once more when inferd is busy and the deadline leaves time for the
-    /// wait it asks for. Without inferd, one warning is logged and every call fails as
+    /// Runs `attempt` once, and once more when inferd is busy and the deadline leaves time for
+    /// the wait it asks for. Each attempt runs on its own thread, so a cancel returns at once,
+    /// also during the wait. Without inferd, one warning is logged and every call fails as
     /// unavailable, which leaves captures to metadata.
-    fn call<T>(
+    fn call<T: Send + 'static>(
         &self,
-        deadline: Instant,
-        call: impl Fn(Job) -> Result<T, InferError>,
+        call: &ModelCall<'_>,
+        attempt: impl Fn(InferdClient, Job) -> Result<T, InferError> + Clone + Send + 'static,
     ) -> Result<T, ModelError> {
-        let job = || Job {
-            deadline,
-            priority: Priority::Interactive,
+        let run = || {
+            let client = self.client.clone();
+            let attempt = attempt.clone();
+            let job = Job {
+                deadline: call.deadline,
+                priority: Priority::Interactive,
+            };
+            call.wait_for(move || attempt(client, job))
+                .ok_or(ModelError::Cancelled)
         };
-        let result = match call(job()) {
-            Err(InferError::Busy { retry_after }) if Instant::now() + retry_after < deadline => {
-                std::thread::sleep(retry_after);
-                call(job())
+        match run()? {
+            Err(InferError::Busy { retry_after })
+                if Instant::now() + retry_after < call.deadline =>
+            {
+                if !call.sleep(retry_after) {
+                    return Err(ModelError::Cancelled);
+                }
+                run()?.map_err(|error| self.model_error(error))
             }
-            other => other,
-        };
-        result.map_err(|error| self.model_error(error))
+            other => other.map_err(|error| self.model_error(error)),
+        }
     }
 
     fn model_error(&self, error: InferError) -> ModelError {
@@ -64,11 +76,11 @@ impl ScreenModels for InferScreenModels {
     fn recognize_text(
         &self,
         region: &RegionCopy,
-        deadline: Instant,
+        call: &ModelCall<'_>,
     ) -> Result<Vec<RecognizedLine>, ModelError> {
-        let frame = sealed_frame(region)?;
+        let frame = Arc::new(sealed_frame(region)?);
         let origin = region.bounds();
-        let lines = self.call(deadline, |job| self.client.recognize_frame(&frame, job))?;
+        let lines = self.call(call, move |client, job| client.recognize_frame(&frame, job))?;
         Ok(lines
             .into_iter()
             .map(|line| RecognizedLine {
@@ -89,12 +101,12 @@ impl ScreenModels for InferScreenModels {
         region: &RegionCopy,
         app_name: &str,
         window_title: &str,
-        deadline: Instant,
+        call: &ModelCall<'_>,
     ) -> Result<ScreenSummary, ModelError> {
-        let frame = sealed_frame(region)?;
-        let description = self.call(deadline, |job| {
-            self.client
-                .describe_frame(&frame, app_name, window_title, job)
+        let frame = Arc::new(sealed_frame(region)?);
+        let (app_name, window_title) = (app_name.to_owned(), window_title.to_owned());
+        let description = self.call(call, move |client, job| {
+            client.describe_frame(&frame, &app_name, &window_title, job)
         })?;
         Ok(ScreenSummary {
             content_kind: format!("{:?}", description.content_kind).to_ascii_lowercase(),
@@ -119,3 +131,6 @@ fn sealed_frame(region: &RegionCopy) -> Result<SealedFrame, ModelError> {
     )
     .map_err(|error| ModelError::Failed(error.to_string()))
 }
+
+#[cfg(test)]
+mod tests;

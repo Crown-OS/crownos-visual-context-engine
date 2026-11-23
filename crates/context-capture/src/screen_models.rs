@@ -1,8 +1,7 @@
 //! What the analysis asks of the model layer. The capture code depends on this trait only; one
 //! adapter maps it onto crown-context-inferd.
 
-use std::time::Instant;
-
+use crate::cancellation::ModelCall;
 use crate::geometry::Rect;
 use crate::region_copy::RegionCopy;
 
@@ -27,6 +26,8 @@ pub enum ModelError {
     Unavailable(String),
     #[error("the model failed: {0}")]
     Failed(String),
+    #[error("the call was cancelled")]
+    Cancelled,
 }
 
 pub trait ScreenModels: Send + Sync {
@@ -38,7 +39,7 @@ pub trait ScreenModels: Send + Sync {
     fn recognize_text(
         &self,
         region: &RegionCopy,
-        deadline: Instant,
+        call: &ModelCall<'_>,
     ) -> Result<Vec<RecognizedLine>, ModelError>;
 
     /// # Errors
@@ -49,7 +50,7 @@ pub trait ScreenModels: Send + Sync {
         region: &RegionCopy,
         app_name: &str,
         window_title: &str,
-        deadline: Instant,
+        call: &ModelCall<'_>,
     ) -> Result<ScreenSummary, ModelError>;
 }
 
@@ -61,7 +62,7 @@ impl ScreenModels for NoScreenModels {
     fn recognize_text(
         &self,
         _: &RegionCopy,
-        _: Instant,
+        _: &ModelCall<'_>,
     ) -> Result<Vec<RecognizedLine>, ModelError> {
         Err(ModelError::Unavailable("OCR".to_owned()))
     }
@@ -71,7 +72,7 @@ impl ScreenModels for NoScreenModels {
         _: &RegionCopy,
         _: &str,
         _: &str,
-        _: Instant,
+        _: &ModelCall<'_>,
     ) -> Result<ScreenSummary, ModelError> {
         Err(ModelError::Unavailable("a vision model".to_owned()))
     }

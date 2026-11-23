@@ -6,7 +6,6 @@ mod crop_reading;
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use context_core::{FrameRecord, Observation, ObservationKind, TextSource, Timestamp, WindowIdent};
@@ -14,6 +13,7 @@ use lru::LruCache;
 
 use crop_reading::CropPlan;
 
+use crate::cancellation::{Cancellation, ModelCall};
 use crate::crop::union_crop;
 use crate::frame::{CaptureTarget, CapturedFrame};
 use crate::geometry::Rect;
@@ -42,7 +42,7 @@ const REMEMBERED_WINDOWS: NonZeroUsize = match NonZeroUsize::new(32) {
 #[derive(Debug, Clone, Copy)]
 pub struct AnalysisConditions<'a> {
     pub on_battery: bool,
-    pub cancel: &'a AtomicBool,
+    pub cancel: &'a dyn Cancellation,
 }
 
 /// What one capture left behind: text and numbers, no pixels.
@@ -145,7 +145,11 @@ impl FrameAnalyzer {
         conditions: AnalysisConditions<'_>,
     ) -> CaptureOutcome {
         let deadline = Instant::now() + CAPTURE_ANALYSIS_BUDGET;
-        let cancelled = || conditions.cancel.load(Ordering::Relaxed);
+        let cancelled = || conditions.cancel.is_cancelled();
+        let call = ModelCall {
+            deadline,
+            cancel: conditions.cancel,
+        };
         let target = frame.target.clone();
         let window = &target.window;
         let first_capture = !self.tile_hashes.contains(window);
@@ -190,7 +194,7 @@ impl FrameAnalyzer {
                     ocr_copy.as_ref(),
                     self.models.as_ref(),
                     &mut self.line_caches,
-                    deadline,
+                    &call,
                 );
                 if reading.lines_left_unread {
                     self.tile_hashes.pop(window);
@@ -213,7 +217,7 @@ impl FrameAnalyzer {
             })
             .and_then(|copy| {
                 self.models
-                    .describe_screen(&copy, &target.app_name, &target.title, deadline)
+                    .describe_screen(&copy, &target.app_name, &target.title, &call)
                     .map_err(|error| tracing::debug!(%error, "no screen description"))
                     .ok()
             });

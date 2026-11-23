@@ -194,7 +194,7 @@ impl FrameMemory {
 
     /// Overwrites every byte with zero. The writes are volatile, so the compiler keeps them
     /// even when nothing reads the memory again.
-    pub fn wipe(&self) {
+    fn wipe(&self) {
         let words = self.length / WORD;
         let base = self.mapping.as_ptr();
         for index in 0..words {

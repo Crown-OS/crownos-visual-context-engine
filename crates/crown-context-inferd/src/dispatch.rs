@@ -19,6 +19,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::admission::{Admission, Permit};
 use crate::convert;
 use crate::engine::Engine;
+use crate::job_gate::JobGate;
 
 /// A reply is a few vectors at most; larger embedding batches must be split.
 const MAX_VECTOR_BYTES: usize = 768 * 1024;
@@ -58,13 +59,19 @@ pub(crate) struct Dispatcher {
     replies: UnboundedSender<Reply>,
     fixed_cost: Admission,
     generation: Admission,
+    gate: Arc<JobGate>,
 }
 
 impl Dispatcher {
-    pub(crate) fn new(engine: Arc<Engine>, replies: UnboundedSender<Reply>) -> Self {
+    pub(crate) fn new(
+        engine: Arc<Engine>,
+        replies: UnboundedSender<Reply>,
+        gate: Arc<JobGate>,
+    ) -> Self {
         Self {
             engine,
             replies,
+            gate,
             fixed_cost: Admission::new(6, 2, Duration::from_millis(100)),
             generation: Admission::new(1, 1, Duration::from_secs(2)),
         }
@@ -210,6 +217,14 @@ impl Dispatcher {
             }
         };
         let ticket = call.ticket();
+        if self.gate.is_closed() {
+            drop(fds);
+            let sleeping = M::Reply::from_failure(InferFailure::Unavailable(
+                "the system is going to sleep".into(),
+            ));
+            send_reply(server, reply(peer, request_id, &sleeping));
+            return;
+        }
         let interactive = ticket.is_some_and(|ticket| ticket.priority == JobPriority::Interactive);
         let admitted = admission.map(|admission| admission.admit(interactive));
         let permit: Option<Permit> = match admitted.transpose() {
@@ -227,7 +242,16 @@ impl Dispatcher {
         if let Some(ticket) = ticket {
             tracing::debug!(job_id = ticket.job_id, priority = ?ticket.priority, "job admitted");
         }
+        let gate = Arc::clone(&self.gate);
         tokio::task::spawn_blocking(move || {
+            let Some(_running) = gate.enter() else {
+                drop(fds);
+                let sleeping = M::Reply::from_failure(InferFailure::Unavailable(
+                    "the system is going to sleep".into(),
+                ));
+                let _ = replies.send(reply(peer, request_id, &sleeping));
+                return;
+            };
             let answer = work(&engine, call, fds);
             drop(permit);
             if let Some(ticket) = ticket {

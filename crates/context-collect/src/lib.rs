@@ -12,7 +12,8 @@ mod util;
 mod window_table;
 
 pub use bridge::{
-    BridgeError, BridgeHandle, BridgeLink, CompositorBridge, ExposureHook, Outlet, SensitiveReason,
+    BridgeError, BridgeHandle, BridgeLink, CompositorBridge, ExposureHook, ExposureRefused, Outlet,
+    SensitiveReason,
 };
 pub use replay::replay;
 pub use window_table::WindowTable;

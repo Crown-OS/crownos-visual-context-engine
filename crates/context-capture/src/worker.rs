@@ -6,6 +6,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::analysis::{AnalysisConditions, CaptureOutcome, FrameAnalyzer};
+use crate::capture_hold::CaptureHolds;
 use crate::frame_inbox::FrameInbox;
 use crate::metrics::CaptureMetrics;
 
@@ -25,7 +26,7 @@ pub(crate) struct AnalysisWorker {
 pub(crate) struct WorkerParts {
     pub(crate) inbox: Arc<FrameInbox>,
     pub(crate) analyzer: FrameAnalyzer,
-    pub(crate) cancel: Arc<AtomicBool>,
+    pub(crate) cancel: Arc<CaptureHolds>,
     pub(crate) metrics: Arc<CaptureMetrics>,
     pub(crate) on_battery: PowerProbe,
     pub(crate) deliver: OutcomeSink,
@@ -74,7 +75,7 @@ fn run(mut parts: WorkerParts, stop: &AtomicBool) {
         let running = AnalysisRunning(&parts.inbox);
         let conditions = AnalysisConditions {
             on_battery: (parts.on_battery)(),
-            cancel: &parts.cancel,
+            cancel: parts.cancel.as_ref(),
         };
         let outcome = parts.analyzer.analyse(frame, conditions);
         drop(running);

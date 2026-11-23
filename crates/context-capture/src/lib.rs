@@ -6,6 +6,7 @@
 //! leave this crate.
 
 mod analysis;
+mod cancellation;
 mod capture_hold;
 mod crop;
 mod frame;
@@ -32,6 +33,7 @@ mod worker;
 mod test_frames;
 
 pub use analysis::{AnalysisConditions, CAPTURE_ANALYSIS_BUDGET, CaptureOutcome, FrameAnalyzer};
+pub use cancellation::{Cancellation, ModelCall};
 pub use capture_hold::CaptureHold;
 pub use frame::{CaptureTarget, CapturedFrame, FrameLayoutError};
 pub use frame_queue::{FRAME_TIME_TO_LIVE, FrameQueue, MAX_QUEUED_BYTES, MAX_QUEUED_FRAMES};

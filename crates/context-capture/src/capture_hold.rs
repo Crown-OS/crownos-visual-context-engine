@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use crate::cancellation::Cancellation;
+
 /// Why captures are held. Each reason is released on its own, so waking from sleep does not
 /// end a pause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +26,12 @@ impl CaptureHold {
 
 #[derive(Debug, Default)]
 pub(crate) struct CaptureHolds(AtomicU8);
+
+impl Cancellation for CaptureHolds {
+    fn is_cancelled(&self) -> bool {
+        self.is_held()
+    }
+}
 
 impl CaptureHolds {
     pub(crate) fn hold(&self, reason: CaptureHold) {

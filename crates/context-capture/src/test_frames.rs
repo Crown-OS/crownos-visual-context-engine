@@ -72,3 +72,18 @@ pub(crate) fn is_all_zero(reader: &std::os::fd::OwnedFd) -> bool {
     let read = rustix::io::pread(reader, &mut contents, 0).unwrap();
     read == length && contents.iter().all(|byte| *byte == 0)
 }
+
+/// The inode of `fd`, to find it again among the open descriptors.
+pub(crate) fn inode_of(fd: std::os::fd::BorrowedFd<'_>) -> u64 {
+    rustix::fs::fstat(fd).unwrap().st_ino
+}
+
+/// The inodes of every descriptor this process has open now.
+pub(crate) fn open_inodes() -> std::collections::HashSet<u64> {
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| rustix::fs::stat(entry.path()).ok())
+        .map(|stat| stat.st_ino)
+        .collect()
+}

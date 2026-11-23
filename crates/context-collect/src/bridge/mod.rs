@@ -18,6 +18,7 @@ use context_core::Observation;
 use wayland_client::globals::{BindError, registry_queue_init};
 use wayland_client::{Connection, DispatchError};
 
+pub use crate::util::identifiable_connect::ExposureRefused;
 pub use link::{BridgeLink, ExposureHook, SensitiveReason};
 use state::BridgeState;
 
@@ -38,6 +39,8 @@ pub enum BridgeError {
     Dispatch(#[from] DispatchError),
     #[error("cannot start the bridge thread: {0}")]
     Thread(#[from] std::io::Error),
+    #[error(transparent)]
+    ExposureRefused(#[from] ExposureRefused),
 }
 
 const RETRY: Duration = Duration::from_secs(3);

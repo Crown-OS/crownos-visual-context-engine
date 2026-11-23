@@ -11,11 +11,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Instant;
 
 use context_capture::{
-    AnalysisConditions, CaptureTarget, CapturedFrame, FrameAnalyzer, FrameMemory, ModelError,
-    NoStructuredText, RecognizedLine, RegionCopy, ScreenModels, ScreenSummary,
+    AnalysisConditions, CaptureTarget, CapturedFrame, FrameAnalyzer, FrameMemory, ModelCall,
+    ModelError, NoStructuredText, RecognizedLine, RegionCopy, ScreenModels, ScreenSummary,
 };
 use context_core::{
     FrameRecord, Micros, Observation, ObservationKind, Placement, SelectionKind, SessionState,
@@ -38,7 +37,7 @@ impl ScreenModels for EchoModels {
     fn recognize_text(
         &self,
         region: &RegionCopy,
-        _: Instant,
+        _: &ModelCall<'_>,
     ) -> Result<Vec<RecognizedLine>, ModelError> {
         Ok(self
             .lines
@@ -56,7 +55,7 @@ impl ScreenModels for EchoModels {
         _: &RegionCopy,
         _: &str,
         _: &str,
-        _: Instant,
+        _: &ModelCall<'_>,
     ) -> Result<ScreenSummary, ModelError> {
         Ok(ScreenSummary {
             content_kind: "image".to_owned(),

@@ -6,7 +6,9 @@ mod admission;
 mod convert;
 mod dispatch;
 mod engine;
+mod job_gate;
 mod logging;
+mod sleep_guard;
 mod util;
 
 use std::path::PathBuf;
@@ -22,6 +24,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::dispatch::{Dispatcher, RESIDENT, send_reply};
 use crate::engine::Engine;
+use crate::job_gate::JobGate;
 use crate::util::memory::memory_tier;
 use crate::util::power::on_battery;
 
@@ -78,7 +81,13 @@ async fn main() -> Result<()> {
     );
 
     let (replies, mut outbox) = tokio::sync::mpsc::unbounded_channel();
-    let dispatcher = Dispatcher::new(Arc::clone(&engine), replies);
+    let gate = Arc::new(JobGate::default());
+    let dispatcher = Dispatcher::new(Arc::clone(&engine), replies, Arc::clone(&gate));
+    tokio::spawn(async move {
+        if let Err(error) = sleep_guard::guard_sleep(gate).await {
+            tracing::warn!(%error, "jobs are not ended before sleep");
+        }
+    });
     let idle_unload = tokio::spawn(unload_idle_models(
         Arc::clone(&engine),
         Duration::from_secs(cli.idle_unload_seconds),

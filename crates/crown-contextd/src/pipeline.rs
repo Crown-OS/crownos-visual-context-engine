@@ -137,11 +137,11 @@ impl Worker {
             return;
         };
         shared.observations_seen += 1;
-        if shared.paused && !matches!(observation.kind, ObservationKind::Paused { .. }) {
+        if self.holds_secret(&observation) {
             shared.observations_dropped += 1;
             return;
         }
-        if self.holds_secret(&observation) {
+        if shared.paused && !matches!(observation.kind, ObservationKind::Paused { .. }) {
             shared.observations_dropped += 1;
             return;
         }
@@ -289,7 +289,8 @@ impl Worker {
     /// its window: the gates can change between the capture and the store.
     fn write_capture_output(&mut self, shared: &Shared) {
         let still_allowed = |window: &WindowIdent| {
-            !shared.paused
+            shared.enabled
+                && !shared.paused
                 && shared.engine.is_observing()
                 && !self.locally_sensitive.is_marked(window)
                 && shared

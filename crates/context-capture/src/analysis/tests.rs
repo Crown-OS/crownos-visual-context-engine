@@ -6,20 +6,24 @@
 )]
 
 use std::sync::Mutex;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use context_core::Trigger;
 
 use super::*;
+use crate::cancellation::ModelCall;
 use crate::region_copy::RegionCopy;
 use crate::screen_models::{ModelError, RecognizedLine};
 use crate::structured_text::NoStructuredText;
-use crate::test_frames::{frame_for, is_all_zero, memfd_reader, paint_rect, target};
+use crate::test_frames::{
+    frame_for, inode_of, is_all_zero, memfd_reader, open_inodes, paint_rect, target,
+};
 
 const AWS_KEY_LINE: &str = "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
 
 #[derive(Default)]
 struct FakeModels {
+    copies_seen: Mutex<Vec<u64>>,
     ocr_fails: AtomicBool,
     ocr_text: Mutex<String>,
     caption: Mutex<String>,
@@ -48,9 +52,13 @@ impl ScreenModels for FakeModels {
     fn recognize_text(
         &self,
         region: &RegionCopy,
-        _: Instant,
+        _: &ModelCall<'_>,
     ) -> Result<Vec<RecognizedLine>, ModelError> {
         self.ocr_calls.fetch_add(1, Ordering::Relaxed);
+        self.copies_seen
+            .lock()
+            .unwrap()
+            .push(inode_of(region.memfd()));
         if self.ocr_fails.load(Ordering::Relaxed) {
             return Err(ModelError::Failed("busy".to_owned()));
         }
@@ -66,7 +74,7 @@ impl ScreenModels for FakeModels {
         _: &RegionCopy,
         _: &str,
         _: &str,
-        _: Instant,
+        _: &ModelCall<'_>,
     ) -> Result<ScreenSummary, ModelError> {
         self.describe_calls.fetch_add(1, Ordering::Relaxed);
         Ok(ScreenSummary {
@@ -257,4 +265,25 @@ fn the_frame_memfd_is_zero_after_analysis() {
     let cancel = AtomicBool::new(false);
     analyzer(&models).analyse(frame, plugged_in(&cancel));
     assert!(is_all_zero(&reader));
+}
+
+#[test]
+fn region_copies_are_closed_after_analysis_and_after_an_error() {
+    let models = FakeModels::reading("fn main() {");
+    let cancel = AtomicBool::new(false);
+    let mut analyzer = analyzer(&models);
+    analyzer.analyse(line_at(10, vec![]), on_battery(&cancel));
+    models.ocr_fails.store(true, Ordering::Relaxed);
+    let other_line = frame_for(
+        target("editor"),
+        200,
+        100,
+        |pixels| paint_rect(pixels, 200, Rect::new(20, 60, 80, 10)),
+        vec![Rect::new(0, 0, 200, 100)],
+    );
+    analyzer.analyse(other_line, on_battery(&cancel));
+    let seen = models.copies_seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+    let open = open_inodes();
+    assert!(seen.iter().all(|inode| !open.contains(inode)));
 }

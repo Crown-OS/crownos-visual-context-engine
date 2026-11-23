@@ -53,12 +53,14 @@ pub(crate) fn spawn(
     );
     let held = Arc::downgrade(&service);
     link.set_exposure_hook(Arc::new(move |exposed| {
-        if let Some(service) = held.upgrade() {
-            if exposed {
-                service.suspend(CaptureHold::IdentityExposed, IDENTITY_EXPOSURE_TIMEOUT);
-            } else {
-                service.resume(CaptureHold::IdentityExposed);
-            }
+        let Some(service) = held.upgrade() else {
+            return true;
+        };
+        if exposed {
+            service.suspend(CaptureHold::IdentityExposed, IDENTITY_EXPOSURE_TIMEOUT)
+        } else {
+            service.resume(CaptureHold::IdentityExposed);
+            true
         }
     }));
     Ok(service)

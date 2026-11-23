@@ -24,6 +24,10 @@ wayland-protocols = { workspace = true }
 xxhash-rust = { workspace = true }
 zeroize = { workspace = true }
 
+[dev-dependencies]
+context-protocol = { workspace = true }
+crownos-ipc = { workspace = true }
+
 # The workspace forbids unsafe code, and a crate cannot relax `forbid`. This crate denies it
 # instead, and only `util::frame_memory` (mmap, mlock, madvise, munmap) allows it.
 [lints.rust]

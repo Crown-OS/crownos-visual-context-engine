@@ -2,7 +2,7 @@
 //! analysis thread.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use context_collect::BridgeLink;
@@ -51,7 +51,6 @@ pub struct CaptureService {
     _worker: AnalysisWorker,
     inbox: Arc<FrameInbox>,
     metrics: Arc<CaptureMetrics>,
-    cancel: Arc<AtomicBool>,
     holds: Arc<CaptureHolds>,
 }
 
@@ -62,16 +61,15 @@ impl CaptureService {
     pub fn spawn(link: BridgeLink, parts: CaptureServiceParts) -> Result<Self, SessionError> {
         let inbox = Arc::new(FrameInbox::default());
         let metrics = Arc::new(CaptureMetrics::default());
-        let cancel = Arc::new(AtomicBool::new(false));
+        let holds = Arc::new(CaptureHolds::default());
         let worker = AnalysisWorker::spawn(WorkerParts {
             inbox: Arc::clone(&inbox),
             analyzer: FrameAnalyzer::new(parts.models, parts.structured_text),
-            cancel: Arc::clone(&cancel),
+            cancel: Arc::clone(&holds),
             metrics: Arc::clone(&metrics),
             on_battery: parts.on_battery,
             deliver: parts.deliver,
         })?;
-        let holds = Arc::new(CaptureHolds::default());
         let session = CaptureSession::spawn(
             link,
             Arc::clone(&inbox),
@@ -83,7 +81,6 @@ impl CaptureService {
             _worker: worker,
             inbox,
             metrics,
-            cancel,
             holds,
         })
     }
@@ -104,7 +101,6 @@ impl CaptureService {
     pub fn suspend(&self, reason: CaptureHold, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         self.holds.hold(reason);
-        self.cancel.store(true, Ordering::Relaxed);
         let aborted = self.session.abort(timeout);
         let drained = self
             .inbox
@@ -114,9 +110,7 @@ impl CaptureService {
 
     /// Releases one hold. Captures and analysis run again when none is left.
     pub fn resume(&self, reason: CaptureHold) {
-        if self.holds.release(reason) {
-            self.cancel.store(false, Ordering::Relaxed);
-        }
+        self.holds.release(reason);
     }
 
     pub fn counts(&self) -> CaptureCounts {
@@ -136,9 +130,8 @@ impl CaptureService {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::time::Instant;
-
     use super::*;
+    use crate::cancellation::ModelCall;
     use crate::geometry::Rect;
     use crate::region_copy::RegionCopy;
     use crate::screen_models::{ModelError, RecognizedLine, ScreenModels, ScreenSummary};
@@ -151,7 +144,7 @@ mod tests {
         fn recognize_text(
             &self,
             _: &RegionCopy,
-            _: Instant,
+            _: &ModelCall<'_>,
         ) -> Result<Vec<RecognizedLine>, ModelError> {
             std::thread::sleep(Duration::from_millis(300));
             Ok(Vec::new())
@@ -162,7 +155,7 @@ mod tests {
             _: &RegionCopy,
             _: &str,
             _: &str,
-            _: Instant,
+            _: &ModelCall<'_>,
         ) -> Result<ScreenSummary, ModelError> {
             Err(ModelError::Unavailable("vision".to_owned()))
         }

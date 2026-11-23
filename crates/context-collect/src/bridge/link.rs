@@ -16,8 +16,9 @@ pub enum SensitiveReason {
 }
 
 /// Called with `true` before the process becomes readable through `/proc` to connect, and with
-/// `false` after.
-pub type ExposureHook = Arc<dyn Fn(bool) + Send + Sync>;
+/// `false` after. A `false` answer to `true` means frames may still be in memory: the process
+/// stays hidden and the bridge connects later.
+pub type ExposureHook = Arc<dyn Fn(bool) -> bool + Send + Sync>;
 
 #[derive(Default)]
 struct LinkState {

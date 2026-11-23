@@ -2,10 +2,9 @@
 //! looked up in the line cache. After the frame is zeroed, the bands that were not cached are
 //! read from their sealed copy by OCR in one call.
 
-use std::time::Instant;
-
 use context_core::WindowIdent;
 
+use crate::cancellation::ModelCall;
 use crate::frame::CapturedFrame;
 use crate::geometry::Rect;
 use crate::line_bands::{LineBand, find_line_bands};
@@ -70,13 +69,13 @@ impl CropPlan {
         copy: Option<&RegionCopy>,
         models: &dyn ScreenModels,
         caches: &mut LineCaches,
-        deadline: Instant,
+        call: &ModelCall<'_>,
     ) -> CropReading {
         let mut lines_left_unread = false;
         if !self.unread.is_empty() {
             let recognized = copy.and_then(|copy| {
                 models
-                    .recognize_text(copy, deadline)
+                    .recognize_text(copy, call)
                     .map_err(|error| tracing::debug!(%error, "no OCR for this capture"))
                     .ok()
             });
