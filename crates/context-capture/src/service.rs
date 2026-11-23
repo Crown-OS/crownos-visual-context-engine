@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use context_collect::BridgeLink;
+use context_collect::CompositorLink;
 
 use crate::analysis::FrameAnalyzer;
 use crate::capture_hold::{CaptureHold, CaptureHolds};
@@ -58,7 +58,7 @@ impl CaptureService {
     /// # Errors
     ///
     /// Fails when a thread cannot be started.
-    pub fn spawn(link: BridgeLink, parts: CaptureServiceParts) -> Result<Self, SessionError> {
+    pub fn spawn(link: CompositorLink, parts: CaptureServiceParts) -> Result<Self, SessionError> {
         let inbox = Arc::new(FrameInbox::default());
         let metrics = Arc::new(CaptureMetrics::default());
         let holds = Arc::new(CaptureHolds::default());
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn suspend_zeroes_the_queued_frame_and_waits_for_the_running_one() {
         let service = CaptureService::spawn(
-            BridgeLink::default(),
+            CompositorLink::default(),
             CaptureServiceParts {
                 models: Arc::new(SlowModels),
                 structured_text: Box::new(NoStructuredText),

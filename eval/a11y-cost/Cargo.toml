@@ -1,0 +1,22 @@
+[package]
+name = "a11y-cost"
+description = "The accessibility collector alone, as the listener or the reader of the a11y cost measurement"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+context-collect = { workspace = true, features = ["test-support"] }
+context-core = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "time"] }
+zbus = { workspace = true }
+atspi = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

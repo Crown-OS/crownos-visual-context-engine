@@ -18,6 +18,7 @@ members = [
     "crates/crown-contextd",
     "crates/crown-context",
     "eval",
+    "eval/a11y-cost",
 ]
 
 [workspace.package]
@@ -62,8 +63,9 @@ wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zeroize = "1.8"
 lru = "0.16"
+atspi = { version = "0.30", default-features = false, features = ["connection", "proxies", "tokio"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
-futures-util = { version = "0.3", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await-macro"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
 tokio = { version = "1.52.3", default-features = false }
 tracing = "0.1.44"

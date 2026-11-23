@@ -85,7 +85,7 @@ impl Policy {
         if window.sensitivity.excluded || self.is_excluded(&window.app_id) {
             return Verdict::Drop(Reason::ExcludedApp);
         }
-        if window.sensitivity.private_browsing || self.private_titles.is_match(&window.title) {
+        if window.sensitivity.private_browsing || self.is_private_title(&window.title) {
             return Verdict::Drop(Reason::PrivateBrowsing);
         }
         if window.sensitivity.app_requested {
@@ -101,6 +101,11 @@ impl Policy {
             return Verdict::MetadataOnly(Reason::MotionContent);
         }
         Verdict::Observe
+    }
+
+    /// A title that marks a private-browsing window, wherever the title came from.
+    pub fn is_private_title(&self, title: &str) -> bool {
+        self.private_titles.is_match(title)
     }
 
     pub fn is_excluded(&self, app_id: &str) -> bool {

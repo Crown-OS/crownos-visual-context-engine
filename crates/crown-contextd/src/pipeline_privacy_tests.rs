@@ -16,6 +16,7 @@ use context_capture::{
     AnalysisConditions, CaptureTarget, CapturedFrame, FrameAnalyzer, FrameMemory, ModelCall,
     ModelError, NoStructuredText, RecognizedLine, RegionCopy, ScreenModels, ScreenSummary,
 };
+use context_collect::CompositorLink;
 use context_core::{
     FrameRecord, Micros, Observation, ObservationKind, Placement, SelectionKind, SessionState,
     TextSource, Timestamp, Trigger, WindowIdent, WindowRecord,
@@ -158,10 +159,11 @@ fn run_case(case: u64, width: u32, height: u32, lines: Vec<String>) {
     let (events, _outbox) = tokio::sync::mpsc::unbounded_channel();
     let pipeline = pipeline::spawn(
         observations,
-        Policy::from_section(&section).unwrap(),
+        Arc::new(Policy::from_section(&section).unwrap()),
         writer.handle(),
         Arc::new(Mutex::new(Shared::new(true))),
         events,
+        CompositorLink::default(),
         None,
     )
     .unwrap();
@@ -258,10 +260,11 @@ fn run_pipeline(case: u64, kinds: Vec<ObservationKind>) -> PathBuf {
     let (events, _outbox) = tokio::sync::mpsc::unbounded_channel();
     let pipeline = pipeline::spawn(
         observations,
-        Policy::from_section(&section).unwrap(),
+        Arc::new(Policy::from_section(&section).unwrap()),
         writer.handle(),
         Arc::new(Mutex::new(Shared::new(true))),
         events,
+        CompositorLink::default(),
         None,
     )
     .unwrap();

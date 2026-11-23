@@ -19,7 +19,7 @@ use wayland_client::globals::{BindError, registry_queue_init};
 use wayland_client::{Connection, DispatchError};
 
 pub use crate::util::identifiable_connect::ExposureRefused;
-pub use link::{BridgeLink, ExposureHook, SensitiveReason};
+pub use link::{CompositorLink, ExposureHook, SensitiveReason};
 use state::BridgeState;
 
 use crate::util::identifiable_connect::connect_identifiable;
@@ -50,7 +50,6 @@ const RETRY: Duration = Duration::from_secs(3);
 pub struct BridgeHandle {
     stop: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
-    link: BridgeLink,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -58,10 +57,6 @@ impl BridgeHandle {
     /// Whether the context global is bound right now.
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
-    }
-
-    pub fn link(&self) -> BridgeLink {
-        self.link.clone()
     }
 }
 
@@ -81,31 +76,28 @@ impl CompositorBridge {
     /// # Errors
     ///
     /// Fails only when the thread cannot be spawned; connection problems are retried inside.
-    pub fn spawn(outlet: Outlet) -> Result<BridgeHandle, BridgeError> {
+    pub fn spawn(outlet: Outlet, link: CompositorLink) -> Result<BridgeHandle, BridgeError> {
         let stop = Arc::new(AtomicBool::new(false));
         let connected = Arc::new(AtomicBool::new(false));
-        let link = BridgeLink::default();
         let thread = std::thread::Builder::new()
             .name("context-bridge".to_owned())
             .spawn({
                 let stop = Arc::clone(&stop);
                 let connected = Arc::clone(&connected);
-                let link = link.clone();
                 move || run_forever(&outlet, &link, &stop, &connected)
             })?;
         Ok(BridgeHandle {
             stop,
             connected,
-            link,
             thread: Some(thread),
         })
     }
 }
 
-fn run_forever(outlet: &Outlet, link: &BridgeLink, stop: &AtomicBool, connected: &AtomicBool) {
+fn run_forever(outlet: &Outlet, link: &CompositorLink, stop: &AtomicBool, connected: &AtomicBool) {
     while !stop.load(Ordering::Relaxed) {
         let outcome = run_once(outlet, link, stop, connected);
-        link.disconnected();
+        link.detach();
         match outcome {
             Ok(()) => return,
             Err(BridgeError::Bind(BindError::NotPresent)) => {
@@ -120,7 +112,7 @@ fn run_forever(outlet: &Outlet, link: &BridgeLink, stop: &AtomicBool, connected:
 
 fn run_once(
     outlet: &Outlet,
-    link: &BridgeLink,
+    link: &CompositorLink,
     stop: &AtomicBool,
     connected: &AtomicBool,
 ) -> Result<(), BridgeError> {
@@ -132,7 +124,7 @@ fn run_once(
     })?;
     let handle = queue.handle();
     let mut state = BridgeState::bind(&globals, &handle, outlet.clone(), link.clone())?;
-    link.connected(connection);
+    link.attach(connection);
     connected.store(true, Ordering::Relaxed);
     tracing::info!("bound crownos_context_manager_v1");
     while !stop.load(Ordering::Relaxed) {

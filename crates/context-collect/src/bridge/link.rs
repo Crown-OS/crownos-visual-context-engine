@@ -1,12 +1,16 @@
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use context_core::WindowIdent;
 use crownos_protocols::context::v1::client::crownos_context_window_v1::{
     CrownosContextWindowV1, FlagReason,
 };
+use tokio::sync::watch;
 use wayland_client::Connection;
+
+use crate::window_table::WindowTable;
 
 /// Why the engine asks the compositor to treat a window as sensitive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,34 +24,72 @@ pub enum SensitiveReason {
 /// stays hidden and the bridge connects later.
 pub type ExposureHook = Arc<dyn Fn(bool) -> bool + Send + Sync>;
 
-#[derive(Default)]
-struct LinkState {
-    connection: Option<Connection>,
-    windows: BTreeMap<WindowIdent, CrownosContextWindowV1>,
-    exposure_hook: Option<ExposureHook>,
+/// What the bridge thread shares with the other collectors and the capture pipeline: the
+/// windows it knows, the focus, whether observation is paused, the connection, and a way to flag
+/// a window sensitive. Requests are sent from the caller's thread and flushed at once, so the
+/// bridge thread need not wake.
+#[derive(Clone)]
+pub struct CompositorLink {
+    shared: Arc<LinkState>,
 }
 
-impl std::fmt::Debug for LinkState {
+struct LinkState {
+    windows: RwLock<WindowTable>,
+    proxies: Mutex<HashMap<WindowIdent, CrownosContextWindowV1>>,
+    connection: Mutex<Option<Connection>>,
+    exposure_hook: Mutex<Option<ExposureHook>>,
+    focus: watch::Sender<Option<WindowIdent>>,
+    paused: AtomicBool,
+    locked: AtomicBool,
+}
+
+impl std::fmt::Debug for CompositorLink {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("LinkState")
-            .field("connected", &self.connection.is_some())
-            .field("windows", &self.windows.len())
+            .debug_struct("CompositorLink")
+            .field("connected", &self.connection().is_some())
+            .field("observing", &self.is_observing())
             .finish_non_exhaustive()
     }
 }
 
-/// The bridge's live connection and window objects, for the rest of the engine. Requests are
-/// sent from the caller's thread and flushed at once, so the bridge thread need not wake.
-#[derive(Debug, Clone, Default)]
-pub struct BridgeLink {
-    state: Arc<Mutex<LinkState>>,
+impl Default for CompositorLink {
+    fn default() -> Self {
+        Self {
+            shared: Arc::new(LinkState {
+                windows: RwLock::default(),
+                proxies: Mutex::default(),
+                connection: Mutex::default(),
+                exposure_hook: Mutex::default(),
+                focus: watch::Sender::new(None),
+                paused: AtomicBool::new(false),
+                locked: AtomicBool::new(false),
+            }),
+        }
+    }
 }
 
-impl BridgeLink {
+impl CompositorLink {
+    pub fn with_windows<R>(&self, read: impl FnOnce(&WindowTable) -> R) -> R {
+        match self.shared.windows.read() {
+            Ok(windows) => read(&windows),
+            Err(poisoned) => read(&poisoned.into_inner()),
+        }
+    }
+
+    /// Changes with every compositor focus event.
+    pub fn watch_focus(&self) -> watch::Receiver<Option<WindowIdent>> {
+        self.shared.focus.subscribe()
+    }
+
+    /// Neither paused by the user nor behind the lock screen.
+    pub fn is_observing(&self) -> bool {
+        !self.shared.paused.load(Ordering::Relaxed) && !self.shared.locked.load(Ordering::Relaxed)
+    }
+
     /// The compositor connection while the bridge is bound.
     pub fn connection(&self) -> Option<Connection> {
-        self.state.lock().ok()?.connection.clone()
+        self.shared.connection.lock().ok()?.clone()
     }
 
     /// Asks the compositor to fail captures of `window` for `duration`. Returns whether the
@@ -58,10 +100,13 @@ impl BridgeLink {
         reason: SensitiveReason,
         duration: Duration,
     ) -> bool {
-        let Ok(state) = self.state.lock() else {
-            return false;
-        };
-        let (Some(connection), Some(proxy)) = (&state.connection, state.windows.get(window)) else {
+        let proxy = self
+            .shared
+            .proxies
+            .lock()
+            .ok()
+            .and_then(|proxies| proxies.get(window).cloned());
+        let (Some(proxy), Some(connection)) = (proxy, self.connection()) else {
             return false;
         };
         let reason = match reason {
@@ -75,37 +120,62 @@ impl BridgeLink {
 
     /// Lets the capture pipeline hold its frames while the bridge connects.
     pub fn set_exposure_hook(&self, hook: ExposureHook) {
-        if let Ok(mut state) = self.state.lock() {
-            state.exposure_hook = Some(hook);
+        if let Ok(mut slot) = self.shared.exposure_hook.lock() {
+            *slot = Some(hook);
         }
     }
 
     pub(super) fn exposure_hook(&self) -> Option<ExposureHook> {
-        self.state.lock().ok()?.exposure_hook.clone()
+        self.shared.exposure_hook.lock().ok()?.clone()
     }
 
-    pub(super) fn connected(&self, connection: Connection) {
-        if let Ok(mut state) = self.state.lock() {
-            state.connection = Some(connection);
+    pub(super) fn update_windows<R>(&self, change: impl FnOnce(&mut WindowTable) -> R) -> R {
+        match self.shared.windows.write() {
+            Ok(mut windows) => change(&mut windows),
+            Err(poisoned) => change(&mut poisoned.into_inner()),
         }
     }
 
-    pub(super) fn disconnected(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.connection = None;
-            state.windows.clear();
+    pub(super) fn set_focus(&self, window: Option<WindowIdent>) {
+        self.update_windows(|windows| windows.set_focus(window.clone()));
+        self.shared.focus.send_replace(window);
+    }
+
+    pub(super) fn set_paused(&self, paused: bool) {
+        self.shared.paused.store(paused, Ordering::Relaxed);
+    }
+
+    pub(super) fn set_locked(&self, locked: bool) {
+        self.shared.locked.store(locked, Ordering::Relaxed);
+    }
+
+    pub(super) fn attach(&self, connection: Connection) {
+        if let Ok(mut slot) = self.shared.connection.lock() {
+            *slot = Some(connection);
         }
     }
 
-    pub(super) fn window_described(&self, window: WindowIdent, proxy: CrownosContextWindowV1) {
-        if let Ok(mut state) = self.state.lock() {
-            state.windows.insert(window, proxy);
+    /// The compositor went away: every window it described is gone with it.
+    pub(super) fn detach(&self) {
+        if let Ok(mut slot) = self.shared.connection.lock() {
+            *slot = None;
+        }
+        if let Ok(mut proxies) = self.shared.proxies.lock() {
+            proxies.clear();
+        }
+        self.update_windows(|windows| *windows = WindowTable::default());
+        self.shared.focus.send_replace(None);
+    }
+
+    pub(super) fn remember_proxy(&self, window: WindowIdent, proxy: &CrownosContextWindowV1) {
+        if let Ok(mut proxies) = self.shared.proxies.lock() {
+            proxies.entry(window).or_insert_with(|| proxy.clone());
         }
     }
 
-    pub(super) fn window_closed(&self, window: &WindowIdent) {
-        if let Ok(mut state) = self.state.lock() {
-            state.windows.remove(window);
+    pub(super) fn forget_proxy(&self, window: &WindowIdent) {
+        if let Ok(mut proxies) = self.shared.proxies.lock() {
+            proxies.remove(window);
         }
     }
 }

@@ -10,7 +10,7 @@ use context_capture::{
     CaptureHold, CaptureOutcome, CaptureService, CaptureServiceParts, CaptureTarget,
     InferScreenModels, NoStructuredText,
 };
-use context_collect::{BridgeLink, SensitiveReason};
+use context_collect::{CompositorLink, SensitiveReason};
 use context_core::{Observation, Trigger, WindowIdent};
 use context_infer_client::InferdClient;
 use context_policy::{Policy, Verdict};
@@ -31,7 +31,7 @@ pub(crate) const SECRET_FLAG_DURATION: Duration = Duration::from_secs(10 * 60);
 /// Models run in crown-context-inferd, found in `socket_dir` (default
 /// `$XDG_RUNTIME_DIR/crownos`).
 pub(crate) fn spawn(
-    link: &BridgeLink,
+    link: &CompositorLink,
     outlet: SyncSender<Observation>,
     socket_dir: Option<PathBuf>,
 ) -> Result<Arc<CaptureService>> {
@@ -68,7 +68,7 @@ pub(crate) fn spawn(
 
 /// Asks the compositor to refuse captures of `window` for a while. Returns whether the request
 /// went out.
-pub(crate) fn flag_secret(link: &BridgeLink, window: &WindowIdent) -> bool {
+pub(crate) fn flag_secret(link: &CompositorLink, window: &WindowIdent) -> bool {
     let flagged = link.flag_sensitive(window, SensitiveReason::SecretText, SECRET_FLAG_DURATION);
     tracing::info!(
         flagged,

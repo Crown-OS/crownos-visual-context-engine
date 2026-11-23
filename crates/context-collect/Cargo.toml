@@ -1,6 +1,6 @@
 [package]
 name = "context-collect"
-description = "Collectors of the visual context engine: the compositor bridge, the window table and app resolution"
+description = "Collectors of the visual context engine: the compositor bridge, the accessibility reader, the window table and app resolution"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,8 +12,19 @@ context-core = { workspace = true }
 crownos-protocols = { workspace = true }
 rustix = { workspace = true, features = ["process"] }
 wayland-client = { workspace = true }
+atspi = { workspace = true }
+zbus = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [lints]
 workspace = true
+
+[features]
+test-support = []
+
+[dev-dependencies]
+context-collect = { path = ".", features = ["test-support"] }

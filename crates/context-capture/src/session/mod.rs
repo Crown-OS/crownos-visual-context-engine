@@ -13,7 +13,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use context_collect::BridgeLink;
+use context_collect::CompositorLink;
 use rustix::event::{EventfdFlags, PollFd, PollFlags, Timespec};
 use wayland_client::globals::{BindError, GlobalError, registry_queue_init};
 use wayland_client::{Connection, DispatchError, QueueHandle, backend::WaylandError};
@@ -63,7 +63,7 @@ impl CaptureSession {
     ///
     /// Fails when the wake-up eventfd or the thread cannot be created.
     pub(crate) fn spawn(
-        link: BridgeLink,
+        link: CompositorLink,
         inbox: Arc<FrameInbox>,
         metrics: Arc<CaptureMetrics>,
         holds: Arc<CaptureHolds>,
@@ -142,7 +142,7 @@ fn wake(waker: &OwnedFd) {
 }
 
 struct SessionThread {
-    link: BridgeLink,
+    link: CompositorLink,
     inbox: Arc<FrameInbox>,
     metrics: Arc<CaptureMetrics>,
     holds: Arc<CaptureHolds>,

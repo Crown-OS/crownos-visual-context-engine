@@ -8,13 +8,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use context_capture::{CaptureHold, CaptureScheduler, CaptureService};
-use context_collect::BridgeLink;
+use context_collect::CompositorLink;
 use context_collect::apps::AppResolver;
 use context_core::{
     Observation, ObservationKind, SessionState, Timestamp, WindowIdent, WindowRecord,
 };
 use context_engine::{EngineEvent, SegmentEvent};
-use context_policy::Policy;
+use context_policy::{Policy, find_secrets};
 use context_protocol::{CurrentContext, SegmentView};
 use context_store::{Write, WriteHandle};
 use tokio::sync::mpsc::UnboundedSender;
@@ -58,19 +58,14 @@ impl Pipeline {
     }
 }
 
-/// What the pipeline captures with, when the compositor is live.
-pub(crate) struct Capturing {
-    pub(crate) service: Arc<CaptureService>,
-    pub(crate) link: BridgeLink,
-}
-
 pub(crate) fn spawn(
     observations: Receiver<Observation>,
-    policy: Policy,
+    policy: Arc<Policy>,
     writes: WriteHandle,
     shared: Arc<Mutex<Shared>>,
     events: UnboundedSender<Outgoing>,
-    capturing: Option<Capturing>,
+    link: CompositorLink,
+    capturing: Option<Arc<CaptureService>>,
 ) -> Result<Pipeline> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread = std::thread::Builder::new()
@@ -83,6 +78,7 @@ pub(crate) fn spawn(
                     writes,
                     shared,
                     events,
+                    link,
                     apps: AppResolver::default(),
                     last_context: None,
                     pending_context: None,
@@ -102,15 +98,16 @@ pub(crate) fn spawn(
 }
 
 struct Worker {
-    policy: Policy,
+    policy: Arc<Policy>,
     writes: WriteHandle,
     shared: Arc<Mutex<Shared>>,
     events: UnboundedSender<Outgoing>,
+    link: CompositorLink,
     apps: AppResolver,
     last_context: Option<Instant>,
     pending_context: Option<CurrentContext>,
     last_snapshot: Instant,
-    capturing: Option<Capturing>,
+    capturing: Option<Arc<CaptureService>>,
     scheduler: CaptureScheduler,
     capture_output: CaptureOutput,
     locally_sensitive: LocalSensitivity,
@@ -132,12 +129,13 @@ impl Worker {
     }
 
     fn observe(&mut self, observation: Observation) {
+        let holds_secret = self.holds_secret(&observation);
         let shared = Arc::clone(&self.shared);
         let Ok(mut shared) = shared.lock() else {
             return;
         };
         shared.observations_seen += 1;
-        if self.holds_secret(&observation) {
+        if holds_secret {
             shared.observations_dropped += 1;
             return;
         }
@@ -280,7 +278,7 @@ impl Worker {
             window.as_ref(),
         );
         match target {
-            Some(target) => capturing.service.capture(target),
+            Some(target) => capturing.capture(target),
             None => tracing::debug!(?trigger, "a capture was due but a gate refused it"),
         }
     }
@@ -309,10 +307,9 @@ impl Worker {
     /// A focus change ends the capture session of the old window. A pause or a lock holds all
     /// captures, drops the queued frames and the output that waits for a segment.
     fn follow_capture_gates(&mut self, kind: &ObservationKind) {
-        let Some(capturing) = &self.capturing else {
+        let Some(service) = &self.capturing else {
             return;
         };
-        let service = &capturing.service;
         match kind {
             ObservationKind::Focus(_) => service.end_session(),
             ObservationKind::Paused { paused: true, .. } => {
@@ -338,22 +335,18 @@ impl Worker {
     }
 
     /// Text with a secret in it, from any source, and the record of a capture that saw one, are
-    /// dropped; the window is flagged.
+    /// dropped; the window is flagged. Scanned before the shared state is locked, so the API
+    /// never waits on the scan.
     fn holds_secret(&mut self, observation: &Observation) -> bool {
         let window = match &observation.kind {
-            ObservationKind::Text { window, lines, .. }
-                if !context_policy::find_secrets(&lines.join("\n")).is_empty() =>
-            {
-                window
-            }
+            ObservationKind::Text {
+                window, lines, url, ..
+            } if shows_secret(lines, url.as_deref()) => window,
             ObservationKind::Frame(frame) if frame.secret_seen => &frame.window,
             _ => return false,
         };
         self.capture_output.forget_window(window);
-        let flagged = self
-            .capturing
-            .as_ref()
-            .is_some_and(|capturing| capture::flag_secret(&capturing.link, window));
+        let flagged = capture::flag_secret(&self.link, window);
         if !flagged {
             tracing::info!("the compositor did not take the flag; the engine holds the window");
         }
@@ -404,6 +397,13 @@ impl Worker {
     }
 }
 
+/// Whether text holds a secret, in its lines or its URL. The lines are joined, so a key that
+/// spans two lines is still found.
+fn shows_secret(lines: &[String], url: Option<&str>) -> bool {
+    !find_secrets(&lines.join("\n")).is_empty()
+        || url.is_some_and(|url| !find_secrets(url).is_empty())
+}
+
 /// Input buckets live on in their segment's profile, text and frames in their own tables, and a
 /// copy the source marked secret nowhere; everything else is an event row.
 const fn persisted(kind: &ObservationKind) -> bool {
@@ -414,4 +414,97 @@ const fn persisted(kind: &ObservationKind) -> bool {
             | ObservationKind::Frame(_)
             | ObservationKind::Selection { secret: true, .. }
     )
+}
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use context_core::{TextSource, WindowIdent};
+    use context_policy::VisualContext;
+    use context_store::{Store, Writer};
+
+    use super::*;
+
+    const AWS_KEY: &str = "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
+    const JWT_URL: &str = "https://example.org/callback?token=eyJhbGciOiJIUzI1NiJ9.\
+        eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+    fn text(lines: &[&str], url: Option<&str>) -> Observation {
+        Observation::new(
+            Timestamp::now(),
+            ObservationKind::Text {
+                window: WindowIdent("w".into()),
+                source: TextSource::Accessibility,
+                url: url.map(str::to_owned),
+                lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+            },
+        )
+    }
+
+    #[test]
+    fn secrets_are_found_in_lines_and_in_the_url() {
+        let lines = |lines: &[&str]| {
+            lines
+                .iter()
+                .map(|line| (*line).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert!(shows_secret(&lines(&[AWS_KEY]), None));
+        assert!(shows_secret(&lines(&["plain"]), Some(JWT_URL)));
+        assert!(!shows_secret(
+            &lines(&["plain notes"]),
+            Some("https://example.org/")
+        ));
+    }
+
+    #[test]
+    fn admitted_text_with_a_secret_is_dropped() {
+        let state_dir =
+            std::env::temp_dir().join(format!("crown-contextd-pipeline-{}", std::process::id()));
+        let writer = Writer::spawn(Store::open_dir(&state_dir).unwrap()).unwrap();
+        let section = VisualContext {
+            enabled: true,
+            ..VisualContext::default()
+        };
+        let shared = Arc::new(Mutex::new(Shared::new(true)));
+        let (events, _outbox) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker {
+            policy: Arc::new(Policy::from_section(&section).unwrap()),
+            writes: writer.handle(),
+            shared: Arc::clone(&shared),
+            events,
+            link: CompositorLink::default(),
+            apps: AppResolver::default(),
+            last_context: None,
+            pending_context: None,
+            last_snapshot: Instant::now(),
+            capturing: None,
+            scheduler: CaptureScheduler::default(),
+            capture_output: CaptureOutput::default(),
+            locally_sensitive: LocalSensitivity::default(),
+        };
+        worker.observe(Observation::new(
+            Timestamp::now(),
+            ObservationKind::WindowOpened(WindowRecord {
+                ident: WindowIdent("w".into()),
+                app_id: "org.gnome.TextEditor".into(),
+                title: "notes.txt".into(),
+                ..WindowRecord::default()
+            }),
+        ));
+        let dropped = || shared.lock().unwrap().observations_dropped;
+        worker.observe(text(&["plain notes"], None));
+        assert_eq!(dropped(), 0);
+        worker.observe(text(&[AWS_KEY], None));
+        assert_eq!(dropped(), 1);
+        worker.observe(text(&["plain notes"], Some(JWT_URL)));
+        assert_eq!(dropped(), 2);
+        drop(worker);
+        drop(writer);
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
 }
