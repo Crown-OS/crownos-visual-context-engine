@@ -2,6 +2,7 @@
 //! observation through the policy, lets the engine segment it, persists what it should, and
 //! answers the Context API on crownos-ipc.
 
+mod access;
 mod api;
 mod logging;
 mod pipeline;
@@ -18,9 +19,11 @@ use context_collect::{CompositorBridge, replay};
 use context_eval::Trace;
 use context_policy::{Policy, VisualContext};
 use context_store::{Store, Writer};
-use crownos_ipc::ServiceBuilder;
+use crownos_config::schema::ContextAccess;
 use crownos_ipc::adapter::tokio::serve_with_outbox;
+use crownos_ipc::{Error as IpcError, ServiceBuilder};
 
+use crate::access::Grants;
 use crate::shared::Shared;
 use crate::util::paths::state_dir;
 
@@ -76,6 +79,15 @@ async fn main() -> Result<()> {
     };
 
     let (events, outbox) = tokio::sync::mpsc::unbounded_channel();
+    let grants = Grants::load();
+    let _grants_watch = {
+        let grants = grants.clone();
+        let events = events.clone();
+        crownos_config::subscribe_typed::<ContextAccess, _>(ContextAccess::SECTION, move |access| {
+            grants.replace(access);
+            let _ = events.send(pipeline::Outgoing::GrantsChanged);
+        })
+    };
     let pipeline = pipeline::spawn(
         observations,
         policy,
@@ -88,19 +100,35 @@ async fn main() -> Result<()> {
     if let Some(dir) = &cli.socket_dir {
         builder = builder.directory(dir);
     }
-    let mut server = builder.build().context("binding the context socket")?;
+    let mut server = match builder.verify_sender_per_frame(true).build() {
+        Err(IpcError::Io(error)) if error.kind() == std::io::ErrorKind::Unsupported => {
+            tracing::warn!(%error, "the kernel cannot check each sender; serving without it");
+            let mut builder = ServiceBuilder::new(context_protocol::SERVICE);
+            if let Some(dir) = &cli.socket_dir {
+                builder = builder.directory(dir);
+            }
+            builder.build().context("binding the context socket")?
+        }
+        built => built.context("binding the context socket")?,
+    };
     tracing::info!(
         service = context_protocol::SERVICE,
         "serving the Context API"
     );
-    let mut handler = api::Api::new(Arc::clone(&shared), reader, writer.handle(), bridge);
+    let mut handler = api::Api::new(
+        Arc::clone(&shared),
+        reader,
+        writer.handle(),
+        bridge,
+        grants.clone(),
+    );
     let mut outbox = outbox;
     tokio::select! {
         served = serve_with_outbox(
             &mut server,
-            |server, peer, message| context_protocol::context::dispatch(&mut handler, server, peer, message).map(|()| true),
+            |server, peer, message| context_protocol::context::dispatch_with_peer(&mut handler, server, peer, message).map(|()| true),
             |cx| outbox.poll_recv(cx),
-            api::send_event,
+            |server, outgoing| api::send_event(server, &grants, outgoing),
         ) => served.context("the Context API stopped")?,
         _ = tokio::signal::ctrl_c() => tracing::info!("stopping"),
     }
