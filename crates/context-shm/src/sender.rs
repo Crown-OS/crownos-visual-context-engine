@@ -7,8 +7,9 @@ use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, memfd_create};
 
 use crate::{REQUIRED_SEALS, ShmError};
 
-/// A sealed memfd with a copy of `bytes`, ready to pass over a socket. The seals stop all
-/// later changes, so a receiver can map it read-only and trust what it reads.
+/// A sealed memfd with a copy of `bytes`, ready to pass over a socket. It is filled with
+/// write(2), never mapped writable, so `F_SEAL_WRITE` can go on; the seals stop all later
+/// changes, and a receiver can map it read-only and trust what it reads.
 pub fn share_read_only(name: &CStr, bytes: &[u8]) -> Result<OwnedFd, ShmError> {
     let memfd = memfd_create(name, MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING)?;
     let mut file = File::from(memfd);

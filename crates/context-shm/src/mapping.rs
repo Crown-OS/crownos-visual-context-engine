@@ -5,20 +5,18 @@ use std::ptr::{self, NonNull};
 use rustix::fs::{fcntl_get_seals, fstat};
 use rustix::mm::{MapFlags, ProtFlags, mmap, munmap};
 
-use crate::{SIZE_SEALS, ShmError, WRITE_SEALS};
+use crate::{REQUIRED_SEALS, ShmError};
 
-/// A sealed memfd mapped read-only. The seals stop every new write and every size change.
-/// `FUTURE_WRITE` does not revoke a writable mapping that the sender made before the seal;
-/// [`crate::share_read_only`] never makes one, and a sender that seals `WRITE` cannot keep
-/// one.
+/// A memfd sealed with [`REQUIRED_SEALS`], mapped read-only: its bytes cannot change while
+/// the mapping lives.
 pub struct ReadOnlyMapping {
     address: NonNull<u8>,
     length: usize,
 }
 
-// SAFETY: the mapping is read-only and its file is sealed against new writes and resizes, so
-// for a sender that keeps no writable mapping the bytes are immutable while the mapping lives
-// and any thread may read them.
+// SAFETY: the mapping is read-only and its file carries F_SEAL_WRITE, which the kernel grants
+// only when no writable mapping exists, plus the size seals; the bytes are immutable while the
+// mapping lives and any thread may read them.
 #[allow(unsafe_code)]
 unsafe impl Send for ReadOnlyMapping {}
 // SAFETY: as for `Send`: shared reads of immutable memory.
@@ -26,12 +24,10 @@ unsafe impl Send for ReadOnlyMapping {}
 unsafe impl Sync for ReadOnlyMapping {}
 
 impl ReadOnlyMapping {
-    /// Maps `memfd` after a check that it is sealed against writes (`WRITE` or
-    /// `FUTURE_WRITE`), shrinking and growing. The mapping stays valid after the file
-    /// descriptor closes.
+    /// Maps `memfd` after a check that it carries [`REQUIRED_SEALS`]. The mapping stays
+    /// valid after the file descriptor closes.
     pub fn map(memfd: &OwnedFd) -> Result<Self, ShmError> {
-        let seals = fcntl_get_seals(memfd)?;
-        if !seals.contains(SIZE_SEALS) || !seals.intersects(WRITE_SEALS) {
+        if !fcntl_get_seals(memfd)?.contains(REQUIRED_SEALS) {
             return Err(ShmError::NotSealed);
         }
         let length = usize::try_from(fstat(memfd)?.st_size).map_err(|_| ShmError::Empty)?;
@@ -58,8 +54,8 @@ impl ReadOnlyMapping {
 
 impl AsRef<[u8]> for ReadOnlyMapping {
     fn as_ref(&self) -> &[u8] {
-        // SAFETY: `address` points to `length` readable bytes that live until `Drop`; the seals
-        // stop every new write (see the type documentation for the sender's part).
+        // SAFETY: `address` points to `length` readable bytes that live until `Drop`, and the
+        // write seal leaves no writer, so no mutable alias exists.
         #[allow(unsafe_code)]
         unsafe {
             std::slice::from_raw_parts(self.address.as_ptr(), self.length)
@@ -108,17 +104,20 @@ mod tests {
     }
 
     #[test]
-    fn a_memfd_sealed_with_write_maps_too() {
-        let memfd = memfd_create(c"strict", MemfdFlags::ALLOW_SEALING).unwrap();
+    fn a_memfd_sealed_only_against_future_writes_is_refused() {
+        let memfd = memfd_create(c"future", MemfdFlags::ALLOW_SEALING).unwrap();
         let mut file = File::from(memfd);
         file.write_all(&[7, 8]).unwrap();
         let memfd = OwnedFd::from(file);
         fcntl_add_seals(
             &memfd,
-            SealFlags::WRITE | SealFlags::SHRINK | SealFlags::GROW,
+            SealFlags::FUTURE_WRITE | SealFlags::SHRINK | SealFlags::GROW,
         )
         .unwrap();
-        assert_eq!(ReadOnlyMapping::map(&memfd).unwrap().as_ref(), [7, 8]);
+        assert!(matches!(
+            ReadOnlyMapping::map(&memfd),
+            Err(ShmError::NotSealed)
+        ));
     }
 
     #[test]
