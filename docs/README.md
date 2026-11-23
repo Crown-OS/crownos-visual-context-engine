@@ -1,6 +1,6 @@
 # CrownOS Visual Context Generation Engine (VCGE): Research and Implementation Blueprint
 
-Status: **APPROVED, REVISED**. The user answered the open decisions on 2026-11-23 (see [Decisions](#decisions-2026-11-23)).
+Status: **DRAFT, REVISED 2026-11-23**. The user answered the open decisions on 2026-11-23 (see [Decisions](#decisions-2026-11-23)).
 Date: 2026-11-08. Revised: 2026-11-23.
 Scope: research report, architecture, and a phased implementation plan.
 
@@ -44,7 +44,7 @@ VCGE is a CrownOS subsystem, not an application. It observes the desktop through
      - idle-notify
      - text-input-v3
      - security-context privilege gating
-   - VCGE adds **one new privileged protocol, `crownos_context_v1`**. It carries:
+   - VCGE adds **one new protocol, `crownos_context_v1`**. Since version 2, any app with a grant may bind it. It carries:
      - focus
      - pid and pidfd
      - window sensitivity

@@ -128,6 +128,8 @@ A user override file can add or re-rank candidates. The registry in the repo is 
 
 ### Router
 
+The router is part of `context-infer` and runs in contextd's job scheduler [A]. inferd and relayd report their probe results through `capabilities()`. The router sends a job to inferd for an `Ort` or `Llama` candidate and to relayd for an `Http` candidate. Frame jobs go only to inferd.
+
 1. **Candidates** are (model × runtime × device) for the task.
 2. **Filter** by probe result, policy and tier. The probe checks runtimes and devices without loading a model, as crownos-voice does [V]. Policy covers battery, consent for remote endpoints, and "frames never go to `Http`".
 3. **Rank** by a cached micro-benchmark in `$XDG_CACHE_HOME/crownos/context/backends.ron`, keyed by driver and runtime versions.

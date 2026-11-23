@@ -41,7 +41,7 @@ Since 2026-11-23 the work runs as parallel workstreams. The phases stay as miles
 
 | WS | Workstream | Scope | Phases | Depends on |
 |---|---|---|---|---|
-| W1 | Access control | crownos-config, crownos-ipc, crownos-protocols, crownpositor, xdg-desktop-portal-crownos, contextd, crownos-settings | 1 (and the API scope checks used by 7) | none |
+| W1 | Access control | crownos-config, crownos-ipc, crownos-protocols, crownpositor, xdg-desktop-portal-crownos, contextd, crownos-settings | 1 (and the API scope checks used by 7) | the protocol XML draft (Phase 0 step 2) |
 | W2 | Model layer + inferd | `context-infer*`, `crown-context-inferd`, `models/`, crownos-config `ai.rs` | 3 | none |
 | W3 | Capture, analyse then delete | `context-capture`, contextd, store, systemd units | 2 | W2 traits (a stub is enough) |
 | W4 | Accessibility | `context-collect/a11y`, crownpositor session startup, crownos-computer-use `atspi` bump | 2 | none |
@@ -64,7 +64,7 @@ W0 (these docs), W5 (crownos-secrets-manager, a separate component) and W7 (inte
 
 **Dependencies:** none. **Interfaces:** draft XML, `registry.ron` v2 schema.
 **Testing:** harnesses run in CI on CPU; hardware runs manual with results committed to `eval/results/`.
-**Acceptance:** every [A] item in 04-inference §10.3 for T1, T2 and T4 confirmed or replaced; spike reports written.
+**Acceptance:** every [A] item in 04-inference §10.3 for T1 and T4 confirmed or replaced, and for T2 on the hardware that is available (AMD on the dev machine; Intel when a machine is available); spike reports written.
 
 ### Phase 1 — Compositor integration, access control and event collection
 
@@ -113,7 +113,7 @@ W0 (these docs), W5 (crownos-secrets-manager, a separate component) and W7 (inte
 **Features:** the swappable model layer ([04 §10.4](04-inference.md#104-model-layer-in-context-infer)): `context-infer` modality traits (`Generate`, `Embed`, `Rerank`, `Ocr`, `Transcribe`) and task layer, `registry.ron` v2, router (probe, cached benchmark in `backends.ron`, circuit breaker per (runtime, device), deadline fall-through); backends `context-infer-ort`, `context-infer-llama` (CUDA/Vulkan/ROCm/CPU ggml modules, `mtmd`), `context-infer-http` (hosted by relayd); `crown-context-inferd`; PP-OCR det/rec on changed crops, line-level cache (text only, scroll-invariant), window text state + text deltas, text-source priority (CrownUI > a11y > OCR), content-type/fullscreen gating; capture-time `describe_screen` for low-text frames. crownos-config `ai.rs`: split `Device` from `Runtime`, add `Vulkan`, `TensorRt`, `Rocm`, `Remote`.
 
 **Steps:** traits + task layer; registry v2 loader; router; ort backend; llama backend with dynamic ggml modules; http backend; inferd daemon + socket activation + idle exit; memfd job protocol; OCR pipeline with static-shape buckets; text-state merge; VLM caption gate.
-**Dependencies:** Phase 0 (bake-off fills the registry; the traits can start at once).
+**Dependencies:** Phase 0 (bake-off fills the registry; the traits can start at once). The acceptance items that use captures (soak trace, text-state merge) need Phase 2.
 **Interfaces:** `crownos-visual-context-infer`, `registry.ron` v2.
 **Testing:** `bench-ocr` CER/latency and `bench-vlm` per runtime and device; structured-output conformance test per backend and task schema; swap test (a registry edit changes the model with no code change); fault injection (kill inferd mid-job, hung EP) → contextd requeues text jobs, frames end within their TTL, no data loss; terminal `sudo` prompt detection test.
 **Acceptance:** CER ≤ 3 % on UI/code corpus; OCR p95 latency per §12.1; ≥ 60 % of captures skip OCR entirely via a11y coverage/line cache on the soak trace; inferd crash never affects contextd; a model swap needs only a registry edit.
@@ -170,13 +170,13 @@ W0 (these docs), W5 (crownos-secrets-manager, a separate component) and W7 (inte
 
 ### Phase dependency graph
 
-W1 (Phase 1), W2 (Phase 3) and W6 (Phase 0) start at the same time. The dotted edge means the bake-off fills the registry; the traits do not wait for it.
+W2 (Phase 3) and W6 (Phase 0) start at once. W1 (Phase 1) starts when the protocol XML draft is approved. Dotted edges are soft: the bake-off fills the registry but the traits do not wait for it, and capture needs only the Phase 3 traits (a stub is enough).
 
 ```mermaid
 flowchart LR
   P0 --> P1 --> P2 --> P4 --> P5 --> P6 --> P8
   P0 -.-> P3
-  P3 --> P2
+  P3 -.-> P2
   P3 --> P4
   P5 --> P7
   P6 --> P7 --> P9
@@ -257,7 +257,7 @@ flowchart LR
 | Horizon | Deliverables |
 |---|---|
 | MVP | above |
-| +1 milestone | Phase 6 (semantic/project/procedural/preference), full Phase 7 (context_pack, scopes for agents, Inspector UI) |
+| +1 milestone | Phase 6 (semantic/project/procedural/preference), full Phase 7 (context_pack, fresh auth for `raw`, Inspector UI) |
 | +2 | Phase 8 (UI detection, document OCR, rollups, LAN and consented cloud endpoints) |
 | +3 | Phase 9 (MCP bridge, automation offers, shell/launcher integrations) |
 | Later | aarch64 track (CrownOS on Snapdragon X and DGX Spark); Snapdragon NPU via upstream FastRPC/QNN EP; Wayland-native a11y if a protocol emerges; cross-device memory sync between a user's CrownOS devices (E2E-encrypted, via crownlink); federated per-device memory with Spark as home hub; learned importance from retrieval feedback |

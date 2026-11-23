@@ -74,8 +74,8 @@ Resolution:
 | `raw` | Raw text lines, exact clipboard and notification text, `export`. Needs fresh user auth (polkit `auth_self`, fprintd if enrolled) every `raw_reauth_minutes` (default 5) | Inspector only |
 | `memory_write` | `remember`, `correct` | Inspector, approved agents |
 | `memory_delete` | `forget` | Inspector, CLI (with auth) |
-| `policy_admin` | `set_policy`, change rules, retention and consent | crownos-settings, CLI (with auth) |
-| `engine` | Pause all observation, take captures, flag windows for everyone | `spawned:crown-contextd` only |
+| `policy_admin` | `set_policy`, change rules, retention and consent; global `pause` / `resume` on the Context API | crownos-settings, crownbar (pause menu), CLI (with auth) |
+| `engine` | Pause all observation through `set_paused` on the Wayland protocol; take captures | `spawned:crown-contextd` only |
 | `wayland.window_control`, `wayland.agent_cursor` | Today's trusted-agent Wayland globals | computer-use |
 
 Old names in earlier drafts map as follows: `context.current` → `metadata`, `context.search` → `text`, `context.raw` → `raw`, `memory.write` → `memory_write`, `memory.delete` → `memory_delete`, `policy.admin` → `policy_admin`, `subscribe.context` → `metadata` (topics are filtered per scope). The MCP tool names in [08 Phase 9](08-implementation-plan.md#phase-9--integration-with-crownos-agents) do not change.

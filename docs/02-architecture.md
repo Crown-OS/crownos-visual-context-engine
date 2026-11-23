@@ -30,7 +30,7 @@ flowchart LR
     COR["Correlator + Segmenter<br/>+ Activity Classifier"]
     WM["Working Memory"]
     MM["Memory Manager"]
-    SCH["Job Scheduler<br/>budgets · power · priority"]
+    SCH["Job Scheduler + model router<br/>budgets · power · priority"]
     RET["Retrieval Engine"]
     ST[("SQLCipher store<br/>events · FTS5 · vec · graph")]
     API["Context API<br/>crownos-ipc 'crownos-visual-context'"]
@@ -38,7 +38,7 @@ flowchart LR
   end
 
   subgraph I["crown-context-inferd (sandboxed, no net, no DB)"]
-    REG["Task layer · registry v2 · router"]
+    REG["Task layer · probes"]
     ORT["context-infer-ort<br/>OpenVINO · VitisAI · CUDA/TRT · CPU"]
     LLM["context-infer-llama<br/>CUDA · Vulkan · ROCm · CPU"]
   end
@@ -90,7 +90,7 @@ flowchart LR
 
 ## 5. Compositor bridge: `crownos_context_v1`
 
-XML in `crownos-protocols/protocols/crownos-context-v1.xml`; server impl in `crownpositor/compositor/src/context/`. **Version 2** (decision d): any app may bind. Each client gets the scope of its grant in `context_access.ron`, resolved from its `AppKey` ([05 §11.3](05-privacy-security.md#113-caller-identity-and-scopes)). Many clients can bind at once. Only a client with the `engine` scope (crown-contextd) can pause observation for everyone ([07 §13.1.1](07-api.md#1311-crownos_context_v1-version-2)).
+XML in `crownos-protocols/protocols/crownos-context-v1.xml`; server impl in `crownpositor/compositor/src/context/`. **Version 2** (decision d): any app may bind. Each client gets the scope of its grant in `context_access.ron`, resolved from its `AppKey` ([05 §11.3](05-privacy-security.md#113-caller-identity-and-scopes)). Many clients can bind at once. On the Wayland protocol, only a client with the `engine` scope (crown-contextd) can pause observation for everyone ([07 §13.1.1](07-api.md#1311-crownos_context_v1-version-2)).
 
 ```
 crownos_context_manager_v1                       (global, version 2, any client; filtered per scope)
@@ -161,12 +161,12 @@ All in Rust (edition 2024, toolchain pinned with the rest of CrownOS). `thiserro
 | C7 | **Correlator + Segmenter + Classifier** | contextd | Sliding 10-min event window; joins (input→damage→capture cause, copy→source window, notification→app), heartbeat-merged **activity segments**, task-level **episodes**, activity labels (rules + embedding centroids) | `Admitted<Observation>` → `SegmentEvent`, `EpisodeEvent`, `WorkingMemory` updates | crate `context-engine` | Pure, deterministic, replay-testable; state snapshotted every 60 s | < 20 MB |
 | C8 | **Working Memory** | contextd (in-RAM) | Current focus, segment, episode guess, recent entities (LRU 64), open documents, last N segment summaries | C7 → API | API `current_context`, subscriptions | Snapshot/restore on restart | < 5 MB |
 | C9 | **Memory Manager** | contextd | Persist segments/episodes; request derivations (embed, summarize, extract); entity resolution; fact upsert with bi-temporal invalidation; provenance; importance/confidence; deletion cascade | events + job results → store rows | crate `context-engine::memory` | Idempotent writes keyed by content hash; jobs retried with backoff, expired by deadline | — |
-| C10 | **Job Scheduler** | contextd | Priority queue with deadlines; per-tier token buckets (captures, OCR, embed, LLM, VLM, cloud) scaled by power/thermal/PSI/fullscreen-game; batching; dispatch to inferd (frames and text) or relayd (text only) | jobs → inferd / relayd requests | crownos-ipc + memfd | Back-pressure: coalesce (latest wins per window), drop expired, never unbounded. Frame jobs are never persisted | — |
+| C10 | **Job Scheduler** | contextd | Priority queue with deadlines; model router ([04 §10.4](04-inference.md#104-model-layer-in-context-infer)) that sends each job to inferd or relayd; per-tier token buckets (captures, OCR, embed, LLM, VLM, cloud) scaled by power/thermal/PSI/fullscreen-game; batching; dispatch to inferd (frames and text) or relayd (text only) | jobs → inferd / relayd requests | crownos-ipc + memfd | Back-pressure: coalesce (latest wins per window), drop expired, never unbounded. Frame jobs are never persisted | — |
 | C11 | **Consolidation Worker** | contextd job set (runs in inferd for model work) | Idle+AC: day/episode rollups, project memory refresh, fact dedup/invalidation, procedure mining, preference updates, retention pruning, re-embedding of stored text after a model change, vacuum | store → store | internal | Checkpointed, resumable, abortable on user activity | runs only when idle |
 | C12 | **Retrieval Engine** | contextd | Hybrid search (FTS5 BM25 + vector KNN + graph expansion + temporal filters) fused by RRF, optional rerank, context packing with token budget and caller-scope redaction | query → ranked results / `ContextPack` | crate `context-engine::retrieve` | Timeouts per stage, partial results flagged | p95 < 150 ms (no rerank) |
 | C13 | **Store** | contextd | Schema/migrations, single writer task (coalesced transactions), read pool. No pixels | rows ↔ SQLite | crate `context-store` | WAL, `synchronous=NORMAL`, integrity check at startup, auto-backup of key metadata | — |
 | C14 | **Context API** | contextd | Typed crownos-ipc service; caller `AppKey` (`SO_PEERPIDFD`, opt-in `SO_PASSPIDFD`), per-request scope check against `context_access.ron`, live revocation, rate limits, audit | requests → replies/events | [07-api.md](07-api.md) | Per-connection limits (crownos-ipc: 32 conns/uid, 64 subs) [V] | — |
-| C15 | **Inference Worker** | `crown-context-inferd` | Task layer, registry v2 and router over the ort and llama backends ([04 §10.4](04-inference.md#104-model-layer-in-context-infer)), model load/unload on idle, tasks (read_text, describe_screen, embed_text, rerank, generate, ui_detect) | job (memfd payload) → result | crownos-ipc `crownos-visual-context-infer` | Crash → systemd restart; contextd requeues in-flight text jobs once, frame jobs only within their TTL; circuit breaker per (runtime, device) falls through to the next candidate | see [06](06-performance.md) |
+| C15 | **Inference Worker** | `crown-context-inferd` | Task layer over the ort and llama backends ([04 §10.4](04-inference.md#104-model-layer-in-context-infer)), probes reported to the router, model load/unload on idle, tasks (read_text, describe_screen, embed_text, rerank, generate, ui_detect) | job (memfd payload) → result | crownos-ipc `crownos-visual-context-infer` | Crash → systemd restart; contextd requeues in-flight text jobs once, frame jobs only within their TTL; circuit breaker per (runtime, device) falls through to the next candidate | see [06](06-performance.md) |
 | C16 | **HTTP backend host** (optional) | `crown-context-relayd` | `context-infer-http`: OpenAI-compatible local sidecars, LAN node (DGX Spark), cloud APIs. Consent check, re-verify redaction, audit every request. Text only | redacted text → response | crownos-ipc; HTTP(S) | Not started until an endpoint is configured; network restricted by `IPAddressAllow` | ~10 MB, on demand |
 | C17 | **Agent bridge** (optional) | `crown-context-mcp` | Expose API as MCP tools/resources for CrownOS agents with the agent's scopes | MCP ↔ API | rmcp (as crownui) | Stateless | small |
 | C18 | **CLI / Inspector** | `crown-context`, later CrownUI app in crownos-settings | Inspect, search, explain provenance, forget, pause, export, benchmark | — | API | — | — |

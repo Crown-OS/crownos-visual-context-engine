@@ -219,7 +219,7 @@ Rules:
 - Newton, the Wayland-native accessibility work, is not production ready; the last status post is from 2024 [V].
 
 **Coverage**
-- Good: GTK3/4, Qt5/6, Firefox, Chromium/Electron (with the flag).
+- Good: GTK3/4, Qt5/6, Firefox, Chromium/Electron (when `IsEnabled` is set before they start).
 - Poor: most terminals, Flutter, Java without the bridge, and games [R].
 
 **Strategy [A]** (decision b, 2026-11-23; comparison in [§4.2](#42-b-session-wide-accessibility))
@@ -284,7 +284,7 @@ The full matrix is in [04-inference.md](04-inference.md). Key verified points:
 
 **Intel**
 - [linux-npu-driver](https://github.com/intel/linux-npu-driver/releases) v1.38 and OpenVINO 2026.4.1 support LNL, ARL and PTL NPUs [V].
-- NPU LLM decode is weak (about 2 tok/s on 1B), so use the NPU for static-shape encoders [R].
+- NPU LLM decode figures conflict: about 2 tok/s on 1B in one report, 16–36 tok/s in others ([§4.3](#43-c-a-swappable-model-layer)) [R]. Until the bake-off, use the NPU for static-shape encoders.
 
 **AMD**
 - `amdxdna` is mainline since 6.14 [V].
