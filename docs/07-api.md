@@ -9,7 +9,7 @@ Tags: **[V]** verified · **[A]** design decision.
 | `crownos_context_v1` (version 2), `crownos_capture_privacy_v1` | Wayland (custom XML in crownos-protocols) | crownpositor ↔ any granted client, many at once, each with its own scope; any app → compositor (privacy) |
 | `ext-image-copy-capture-v1`, `ext-foreign-toplevel-list-v1` | Wayland (standard, already implemented [V]) | crownpositor ↔ contextd |
 | **Context API** `crownos-visual-context` | **crownos-ipc**: Unix socket `$XDG_RUNTIME_DIR/crownos/crownos-visual-context.sock`, 20-byte header, postcard payloads, ≤ 16 fds via SCM_RIGHTS, Request/Reply/Notify/Subscribe/Event kinds, signature-hashed selectors [V]. Peer identity: `SO_PEERPIDFD` → `AppKey`, opt-in `SO_PASSPIDFD` per message, scope check per request ([05 §11.3](05-privacy-security.md#113-caller-identity-and-scopes)) | contextd ↔ any granted app: shell, agents, CLI, Inspector, crownbar |
-| Inference API `crownos-visual-context-infer` | crownos-ipc; bulk payloads (frames, text batches) in **sealed memfds** | contextd ↔ inferd (only `spawned:crown-contextd` allowed) |
+| Inference API `crownos-visual-context-infer` | crownos-ipc; bulk payloads (frames, text batches) in **sealed memfds** | contextd ↔ inferd. Any process of the same user can connect (crownos-ipc `SameUid`, socket `0600`); inferd checks no `AppKey` [V]. Received memfds must carry `F_SEAL_WRITE` [V] |
 | Relay API `crownos-visual-context-relay` | crownos-ipc; text only | contextd ↔ relayd, which hosts the OpenAI-compatible HTTP backend (sidecars, LAN, cloud) |
 | Agent bridge | MCP over Unix socket (rmcp, as `crownui/mcp` [V]) | agents ↔ crown-context-mcp ↔ Context API |
 | Upstream services | crownos-ipc clients of `crownotify` (+ new `NotificationPosted`), `crownos-clipboard`; zbus for AT-SPI, UPower, power-profiles | contextd |
@@ -33,7 +33,8 @@ crownos_context_window_v1
 
 Rules:
 - Many clients can bind at once. The compositor resolves each client's `AppKey` at accept, checks it again at bind, and keeps a `Bound` entry with its scope.
-- With no grant, the bind is parked and the user gets the first-use prompt.
+- With no grant, the bind is parked and the user gets the first-use prompt. The prompt waits at most 120 s. After a deny that the user did not remember, the app is not asked again for 10 minutes. contextd does the same for Context API calls [V].
+- Only `exe:/usr/bin/crown-contextd` can hold `engine`, and only while root controls the file. The compositor refuses `engine` to a process that started with `LD_PRELOAD` or `LD_LIBRARY_PATH` [V]. For a host process this is consent, not enforcement ([05 §11.3](05-privacy-security.md#113-caller-identity-and-scopes)).
 - Events are filtered per client. A `metadata` client gets no `title` and no `selection` events.
 - On a config reload, the compositor recomputes every scope. A client that lost its grant gets `revoked`.
 

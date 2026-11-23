@@ -12,7 +12,7 @@ Bake-off machine: Ryzen 7 7840HS (XDNA1 NPU), Radeon 780M (Vulkan), RTX 4050 Lap
 2. **Three backends, not five.** `ort` (ONNX Runtime) runs fixed-graph models. llama.cpp (`llama-cpp-2`) runs generative models. One OpenAI-compatible HTTP backend reaches everything else: vendor runtimes (OpenVINO GenAI/OVMS, FastFlowLM/Lemonade, TRT-LLM), a LAN node and cloud APIs. Vendor runtimes are never linked. This keeps closed NPU kernels out of our process and licence [A].
 3. **Models are data.** `models/registry.ron` v2 lists models with capability tags and per-runtime artifacts, and maps each task to ranked candidates.
 4. **Cheapest model that meets the quality bar**, measured on our own screen-text and eval corpus, not on leaderboards.
-5. **Frames stay local.** Analysis runs at capture time ([05 §11.6](05-privacy-security.md#116-analyse-then-delete)). A frame goes only to the in-process backends of `crown-context-inferd`. It never goes to the HTTP backend [A].
+5. **Frames stay local.** Analysis runs at capture time ([05 §11.6](05-privacy-security.md#116-analyse-then-delete)). A frame goes only to the in-process backends of `crown-context-inferd`. It never goes to the HTTP backend: inferd does not link it [V]. The HTTP backend also refuses an image unless the server is on loopback [V].
 6. **Resident small, load big on demand.** OCR and text embedding stay resident (< 400 MB on the low tier). The LLM loads on demand and unloads after 120 s idle. A capture-time VLM at 1–3 captures per minute never reaches that idle time, so on the NVIDIA tier it stays resident while captures are active and unloads when a game starts. Other tiers load it only on AC power [A].
 7. **One multimodal model serves both "LLM" and "VLM" roles** where the family is natively multimodal (Qwen3.5 small series [V]). This halves resident memory.
 
@@ -81,6 +81,8 @@ Reference numbers, all from other hardware:
 | `crown-context-inferd` (bin) | crownos-ipc server. Hosts the ort and llama backends. Jobs carry images in memfds. Returns `Busy{retry_after}` under load. Unloads idle models. No network, no DB | — |
 
 The workspace keeps `unsafe_code = "forbid"` everywhere else [V]. The two runtime crates hold the mmap and FFI code.
+
+**inferd limits [V].** inferd maps only memfds sealed with `F_SEAL_WRITE|F_SEAL_SHRINK|F_SEAL_GROW` and refuses others. An image can have at most 16384 px per side and 64 MP. A job budget is cut to 10 minutes. Each model queues at most 32 jobs; more jobs get `Busy{retry_after}`. inferd reads the battery state from `/sys/class/power_supply` and skips supplies with `scope=Device`, such as a wireless mouse.
 
 **Where the HTTP backend runs [A].** inferd has `PrivateNetwork=yes`, which also blocks localhost sidecars. So `crown-context-relayd` hosts `context-infer-http`. relayd gets text only, starts only when a sidecar, LAN or cloud endpoint is configured, and may reach only the configured addresses (`IPAddressAllow=`; whether a user unit can apply it is a Phase 0 spike [A]). Frames never reach relayd.
 
@@ -176,8 +178,8 @@ contextd's scheduler does not rank models. For a text-only task it only picks lo
 
 ## 10.5 Pre-processing and hardware acceleration
 
-- Capture buffers: shm through compositor GPU readback (already implemented [V]), into a per-capture memfd ([05 §11.6](05-privacy-security.md#116-analyse-then-delete)). Per-capture CPU work is limited to damaged tiles (xxh3 tile hashes, ~GB/s) and crops.
-- inferd maps the memfd read-only and hands the slice to `ort` (IoBinding with input buffers we own) or to `mtmd`. Frames are never encoded to JPEG or PNG.
+- Capture buffers: shm through compositor GPU readback (already implemented [V]), into a per-capture memfd ([05 §11.6](05-privacy-security.md#116-analyse-then-delete)). Models read sealed copies of regions, not the capture memfd [V]. Per-capture CPU work is limited to damaged tiles (xxh3 tile hashes, ~GB/s) and crops.
+- inferd maps each region copy read-only and hands the slice to `ort` (IoBinding with input buffers we own) or to `mtmd`. Frames are never encoded to JPEG or PNG.
 - dmabuf zero-copy is not used. On hybrid laptops the compositor renders on the iGPU, so a dGPU import needs a copy anyway, and our CPU code cannot zero device buffers [A]. Revisit only if capture rises to about 1 per second.
 
 ## 10.6 Generative call design (keeps LLM usage rare)
@@ -186,7 +188,7 @@ contextd's scheduler does not rank models. For a text-only task it only picks lo
 |---|---|---|---|---|
 | `summarize_segments` | Every ~10 min or 8 closed segments, whichever first; only segments ≥ 60 s active or importance ≥ 0.4 | Per segment: app, title, url/file, label candidates, ≤ 600 tokens of deduped text | `{summary, activity_label, entities[{name,kind,alias}], facts[{s,p,o,confidence}], open_items[]}` per segment | ≤ 60 calls/day T1, ≤ 200 T2–T5 |
 | `summarize_episode` | Episode close | segment summaries + top entities | `{title, summary, project_guess, outcome}` | ≤ 40/day |
-| `describe_screen` | **At capture time**, when a11y + OCR give < ~200 characters or image regions cover > ~40 % of the window. Skipped on battery. On T4, optionally every capture | The frame from the capture memfd (≤ 1280 px long edge [A]) + metadata | `{content_kind, caption, visible_entities[]}`, ≤ 128 tokens | ≤ 6/h and ≤ 50/day on T1–T3; T4 limited only by the gate. When the budget is empty, the frame keeps its OCR text only |
+| `describe_screen` | **At capture time**, when a11y + OCR give < ~200 characters or image regions cover > ~40 % of the window, and at least 50 % of the window changed. Skipped on battery. On T4, optionally every capture | A sealed copy of the whole frame (≤ 1280 px long edge [A]) + metadata | `{content_kind, caption, visible_entities[]}`, ≤ 128 tokens | ≤ 6/h and ≤ 50/day on T1–T3; T4 limited only by the gate. When the budget is empty, the frame keeps its OCR text only |
 | `resolve_entity` | Ambiguous merge only | two entity cards | `{same: bool, confidence}` | rare |
 | Consolidation prompts | Idle + AC | episodes/facts of a project or day | profile / rollup docs | nightly |
 

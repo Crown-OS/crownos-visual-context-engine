@@ -153,11 +153,11 @@ All in Rust (edition 2024, toolchain pinned with the rest of CrownOS). `thiserro
 |---|---|---|---|---|---|---|---|
 | C0 | **Compositor context module** | crownpositor | Window fan-out, pid/pidfd, sensitivity + veto, input buckets, selection metadata, pause | Smithay hooks → Wayland events | `crownos_context_v1`, `crownos_capture_privacy_v1` | Never blocks; if client is slow, Wayland buffers; client disconnect = all VCGE sessions dropped | < 50 µs/event, ~0 RAM |
 | C1 | **Compositor Bridge** | contextd (dedicated calloop thread) | Bind globals, maintain window table keyed by foreign-toplevel id, own capture sessions (focused window only), forward typed `Observation`s | Wayland → bounded channel | crate `context-collect::compositor` | Reconnect with backoff; on reconnect rebuild window table; missing global → degrade to metadata-less mode and report status | 1 thread, < 5 MB |
-| C2 | **Accessibility Extractor** | contextd (tokio task) | Session-wide bus (`IsEnabled` set at session start). Event-driven subscription to a minimum event set; text fetch by `GetMatches` (Qt, ATK bridge), `GetItems` (GTK4) or a bounded concurrent walk; Chromium call allowlist; SHOWING/VISIBLE filter; URL (`DocURL`); password-role detection → `flag_sensitive` | a11y events → `A11yText`, `SensitiveHint` | `atspi` 0.30 | Per-app timeouts (200 ms), node budget (2,000), adaptive backoff, dead/hung object cache, SimHash dedup | < 10 MB |
-| C3 | **CrownUI Tree Reader** | contextd | For CrownUI apps with agent-access grant, read `ui://tree` via MCP socket | MCP → `A11yText` (structured) | `crownui/mcp` client | Missing grant → skip | small |
+| C2 | **Accessibility Extractor** | contextd (tokio task) | Session-wide bus (`IsEnabled` set at session start). Event-driven subscription to a minimum event set; text fetch by `GetMatches` (Qt, ATK bridge), `GetItems` (GTK4) or a bounded concurrent walk; Chromium call allowlist; SHOWING/VISIBLE filter; URL (`DocURL`); password-role detection → `flag_sensitive` for 60 s, set again on each read while the field stays, plus a local mark. Keeps the last reading of each window (`RecentReadings`) for the capture path. Each read passes the content gate ([05 §11.6](05-privacy-security.md#116-analyse-then-delete)) | a11y events → `A11yText`, `SensitiveHint`, last reading per window | `atspi` 0.30 | Per-app timeouts (200 ms), node budget (2,000), adaptive backoff, dead/hung object cache, SimHash dedup | < 10 MB |
+| C3 | **CrownUI Tree Reader** | contextd | **Not built.** Until it exists, CrownUI apps are read through AT-SPI (C2). Plan: for CrownUI apps with agent-access grant, read `ui://tree` via MCP socket | MCP → `A11yText` (structured) | `crownui/mcp` client | Missing grant → skip | small |
 | C4 | **System Collectors** | contextd | Notifications (crownotify `NotificationPosted`), clipboard content for allowed sources (crownos-clipboard `get`), process/app/project resolution (pidfd→cgroup→desktop entry; terminal cwd→git root), recent files (`recently-used.xbel`), power/PSI/thermal/NVML | IPC/proc/inotify → `Observation` | crownos-ipc clients, `monitor-system` resolver | Each collector independent; failures logged + status flag | < 10 MB |
 | C5 | **Policy Gate** | contextd (inline) | Every observation and every derived artifact passes: exclusions, sensitivity, per-app text/clipboard/notification permissions, secret detectors (regex+entropy), retention class assignment | `Observation` → `Admitted<Observation>` or drop + counter | crate `context-policy` | Fail **closed**: unknown policy state = drop | µs per item |
-| C6 | **Frame Pipeline** | contextd (`spawn_blocking`, semaphore 1) | Capture scheduling per trigger, frame in a per-capture memfd, damage-restricted tile hashing, volatile-region masking, crop of changed text regions, OCR and VLM-caption job emission, secret detection on the result, then zeroize and close ([05 §11.6](05-privacy-security.md#116-analyse-then-delete)) | trigger + frame + damage → `OcrJob`, `CaptionJob` → text lines, caption | crate `context-capture` | Frame failure/veto → record "capture_denied" metric only; never retry sensitive. RAM queue ≤ 3 frames / 64 MB, 60 s TTL, then `frame_dropped_unanalysed` | ≤ 1 capture / 2 s hard cap; < 15 ms CPU per capture excl. OCR |
+| C6 | **Frame Pipeline** | contextd (`spawn_blocking`, semaphore 1) | Capture scheduling per trigger, content gate, frame in a per-capture memfd, a11y reading first (text → no OCR; password field → frame dropped unread; no text → OCR), damage-restricted tile hashing, volatile-region masking, crop of changed text regions, region copies sealed with `F_SEAL_WRITE` for the models, then zero and close the frame before any model runs; OCR and VLM-caption jobs on the copies, secret detection on the result ([05 §11.6](05-privacy-security.md#116-analyse-then-delete)) | trigger + frame + damage + a11y reading → `OcrJob`, `CaptionJob` → text lines, caption, `FrameRecord` (with `secret_seen`) | crate `context-capture` | Frame failure/veto → record "capture_denied" metric only; never retry sensitive. RAM queue ≤ 3 frames / 64 MB, 60 s TTL, then `frame_dropped_unanalysed`. Output waits ≤ 30 s for its segment, then is dropped. A secret flags the window for 10 min, also locally when the compositor does not take the flag. A hold (sleep, pause, lock, identity exposure) cancels the wait for inferd | ≤ 1 capture / 2 s hard cap; < 15 ms CPU per capture excl. OCR |
 | C7 | **Correlator + Segmenter + Classifier** | contextd | Sliding 10-min event window; joins (input→damage→capture cause, copy→source window, notification→app), heartbeat-merged **activity segments**, task-level **episodes**, activity labels (rules + embedding centroids) | `Admitted<Observation>` → `SegmentEvent`, `EpisodeEvent`, `WorkingMemory` updates | crate `context-engine` | Pure, deterministic, replay-testable; state snapshotted every 60 s | < 20 MB |
 | C8 | **Working Memory** | contextd (in-RAM) | Current focus, segment, episode guess, recent entities (LRU 64), open documents, last N segment summaries | C7 → API | API `current_context`, subscriptions | Snapshot/restore on restart | < 5 MB |
 | C9 | **Memory Manager** | contextd | Persist segments/episodes; request derivations (embed, summarize, extract); entity resolution; fact upsert with bi-temporal invalidation; provenance; importance/confidence; deletion cascade | events + job results → store rows | crate `context-engine::memory` | Idempotent writes keyed by content hash; jobs retried with backoff, expired by deadline | — |
@@ -171,7 +171,7 @@ All in Rust (edition 2024, toolchain pinned with the rest of CrownOS). `thiserro
 | C17 | **Agent bridge** (optional) | `crown-context-mcp` | Expose API as MCP tools/resources for CrownOS agents with the agent's scopes | MCP ↔ API | rmcp (as crownui) | Stateless | small |
 | C18 | **CLI / Inspector** | `crown-context`, later CrownUI app in crownos-settings | Inspect, search, explain provenance, forget, pause, export, benchmark | — | API | — | — |
 
-**Lifecycle:** `crown-contextd.socket` + `.service` as **systemd user units** (pattern of `crown-voiced` [V]) started at graphical session; `crown-context-inferd` socket-activated by contextd's first job and exits after configurable idle (default 10 min) to release model memory; relayd socket-activated only if an HTTP endpoint is configured. contextd stops all capture on `session=locked` and on `paused`.
+**Lifecycle:** `crown-contextd.socket` + `.service` as **systemd user units** (pattern of `crown-voiced` [V]) started at graphical session; `crown-context-inferd` socket-activated by contextd's first job and exits after configurable idle (default 10 min) to release model memory; relayd socket-activated only if an HTTP endpoint is configured. contextd stops all capture on `session=locked` and on `paused`. It also holds captures during sleep and while it connects to Wayland.
 
 ---
 
@@ -188,9 +188,10 @@ flowchart TD
   G --> E[Event log row<br/>heartbeat-merged]
   G --> K[Correlator]
   K -->|capture trigger| F[Frame Pipeline<br/>frame in memfd]
-  F -->|changed text crops| O[OCR job]
-  F -->|low-text frame| V[VLM caption job]
-  O & V --> Z[zeroize frame<br/>no pixels kept]
+  B -.->|last reading: text skips OCR,<br/>password field drops the frame| F
+  F -->|sealed region copies| Z[zero and close frame<br/>before any model runs]
+  Z -->|changed text crops| O[OCR job]
+  Z -->|low-text frame| V[VLM caption job]
   O --> T[Window text state<br/>line-level delta]
   V --> T
   B --> T
@@ -219,22 +220,31 @@ sequenceDiagram
   participant I as inferd
   C->>B: input_activity(win, typing_paused)
   B->>P: trigger(win, TypingPause)
-  P-->>B: allowed (not sensitive, budget ok, not video/game)
+  P-->>B: allowed (content gate, budget ok, not video/game)
   B->>C: ext_image_copy_capture_frame.capture() on win session
   alt window sensitive
     C-->>B: failed(stopped)
   else
     C-->>B: ready + damage[rects]
     B->>F: frame (shm in a per-capture memfd), damage
-    F->>F: hash 32px tiles inside damage, mask volatile regions
-    F->>I: OCR(det+rec) on changed crops (sealed memfd)
-    I-->>F: lines + boxes + confidences
-    opt low-text frame, not on battery
-      F->>I: describe_screen(frame memfd)
-      I-->>F: content_kind, caption, visible_entities
+    F->>F: last a11y reading of win (wait ≤ 300 ms)
+    alt password field
+      F->>F: drop the frame unread, no frame record
+    else
+      F->>F: hash 32px tiles inside damage, mask volatile regions
+      F->>F: copy regions into memfds sealed with F_SEAL_WRITE
+      F->>F: zero the frame, close its memfd
+      opt no a11y text
+        F->>I: OCR(det+rec) on the changed crop copy
+        I-->>F: lines + boxes + confidences
+      end
+      opt low-text frame, damage ≥ 50 %, not on battery
+        F->>I: describe_screen(copy of the whole frame)
+        I-->>F: content_kind, caption, visible_entities
+      end
+      F->>F: secret detectors on text, close the copies
+      F->>B: TextDelta(win, +lines, -lines), caption?, FrameRecord
     end
-    F->>F: secret detectors on text, zeroize frame, close memfd
-    F->>B: TextDelta(win, +lines, -lines), caption?
   end
 ```
 
