@@ -425,6 +425,7 @@ impl Router {
         let lease = attempt.job.lease.clone();
         let run = Box::new(move |model: Result<&C, &InferError>| {
             let _lease = lease;
+            let call = call;
             let model = match model {
                 Ok(model) => model,
                 Err(load_error) => {
