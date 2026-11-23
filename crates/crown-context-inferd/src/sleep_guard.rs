@@ -1,6 +1,7 @@
 //! Before the system sleeps, no job may hold a frame: `mlock` does not keep pages out of a
 //! hibernation image. A logind delay inhibitor holds the sleep back while new jobs are refused
-//! and the running ones end; their memfds are then unmapped and closed.
+//! and the running ones are cancelled: a job that waits for its model ends at once and its
+//! memfds are unmapped and closed. Only a model call that already runs is waited for.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,8 +12,9 @@ use zbus::zvariant::OwnedFd;
 
 use crate::job_gate::JobGate;
 
-/// Shorter than logind's default `InhibitDelayMaxSec` of 5 s.
-const JOBS_END_TIMEOUT: Duration = Duration::from_secs(4);
+/// Shorter than logind's default `InhibitDelayMaxSec` of 5 s. Only model calls that already
+/// run use it.
+const RUNNING_CALLS_END_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[zbus::proxy(
     interface = "org.freedesktop.login1.Manager",
@@ -37,9 +39,11 @@ pub(crate) async fn guard_sleep(gate: Arc<JobGate>) -> Result<()> {
     while let Some(signal) = sleeps.next().await {
         if signal.args()?.start {
             let gate = Arc::clone(&gate);
-            let ended = tokio::task::spawn_blocking(move || gate.close_and_wait(JOBS_END_TIMEOUT))
-                .await
-                .unwrap_or(false);
+            let ended = tokio::task::spawn_blocking(move || {
+                gate.close_and_cancel(RUNNING_CALLS_END_TIMEOUT)
+            })
+            .await
+            .unwrap_or(false);
             if ended {
                 tracing::info!("no job holds a frame before sleep");
             } else {

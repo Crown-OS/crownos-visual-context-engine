@@ -16,10 +16,10 @@ Environment=CUDA_CACHE_PATH=%C/crownos/context/cuda
 PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX
 MemorySwapMax=0
+MemoryZSwapMax=0
 MemoryHigh=6G
 MemoryMax=8G
 LimitCORE=0
-LimitMEMLOCK=128M
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only

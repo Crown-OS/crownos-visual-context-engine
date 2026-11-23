@@ -14,6 +14,7 @@ context-shm = { workspace = true }
 crownos-ipc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+rustix = { workspace = true, features = ["event"] }
 
 [lints]
 workspace = true

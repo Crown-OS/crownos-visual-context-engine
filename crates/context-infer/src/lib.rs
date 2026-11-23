@@ -21,7 +21,9 @@ pub use crownos_config::system::ai::{Device, Runtime};
 pub use error::InferError;
 pub use media::{Image, ImageLayoutError, Media, PixelFormat, SharedBytes};
 pub use registry::{Capability, Registry};
-pub use request::{GenRequest, Generation, Job, Message, Output, Priority, Role, Sampling};
+pub use request::{
+    GenRequest, Generation, Job, JobCancel, Message, Output, Priority, Role, Sampling,
+};
 pub use router::{
     BenchmarkCache, BreakerSettings, EmbeddedTexts, LoadSpec, Policy, Router, RouterSettings,
     RuntimeBackend, benchmark_fingerprint, default_benchmark_path,

@@ -263,13 +263,17 @@ impl Harness {
     }
 
     pub(super) fn describe(&self, budget: Duration) -> Result<String, InferError> {
+        self.describe_job(Job::within(budget, Priority::Interactive))
+    }
+
+    pub(super) fn describe_job(&self, job: Job) -> Result<String, InferError> {
         let request = GenRequest {
             messages: Vec::new(),
             media: Vec::new(),
             output: Output::Text,
             sampling: Sampling::default(),
             max_tokens: 16,
-            job: Job::within(budget, Priority::Interactive),
+            job,
         };
         self.router
             .generate(Task::DescribeScreen, request)
@@ -285,7 +289,7 @@ impl Harness {
             .embed(
                 texts,
                 EmbedPurpose::Document,
-                Job::within(budget, Priority::Background),
+                &Job::within(budget, Priority::Background),
             )
             .map(|embedded| embedded.space.to_string())
     }

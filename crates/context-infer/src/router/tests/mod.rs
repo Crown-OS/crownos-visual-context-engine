@@ -15,6 +15,7 @@ use crownos_config::system::ai::Device;
 use super::{BenchmarkCache, BreakerSettings, Policy};
 use crate::error::InferError;
 use crate::registry::{Capability, Registry, Tier};
+use crate::request::{Job, Priority};
 use crate::task::Task;
 use fakes::{Behaviour, Harness, REGISTRY, SECOND, settings};
 
@@ -325,4 +326,35 @@ fn idle_unload_keeps_the_resident_capabilities() {
     harness.describe(SECOND).unwrap();
     assert_eq!(harness.onnx.load_count(), 1);
     assert_eq!(harness.llama.load_count(), 2);
+}
+
+#[test]
+fn a_cancelled_job_stops_the_wait_and_keeps_the_model() {
+    let harness = Harness::all_devices();
+    harness.llama.set("small", Device::Cuda, Behaviour::Slow);
+    let job = Job::within(SECOND, Priority::Interactive);
+    let cancel = job.cancel.clone();
+    let started = Instant::now();
+    let answer = thread::scope(|scope| {
+        scope.spawn(|| {
+            thread::sleep(Duration::from_millis(50));
+            cancel.cancel();
+        });
+        harness.describe_job(job)
+    });
+    assert!(matches!(answer, Err(InferError::Cancelled)), "{answer:?}");
+    assert!(started.elapsed() < Duration::from_millis(250));
+    assert_eq!(harness.describe(QUICK).unwrap(), "small@Cuda");
+}
+
+#[test]
+fn a_job_cancelled_before_its_turn_never_runs() {
+    let harness = Harness::all_devices();
+    let job = Job::within(SECOND, Priority::Interactive);
+    job.cancel.cancel();
+    assert!(matches!(
+        harness.describe_job(job),
+        Err(InferError::Cancelled)
+    ));
+    assert!(harness.calls().is_empty());
 }

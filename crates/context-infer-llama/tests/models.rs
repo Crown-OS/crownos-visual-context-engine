@@ -64,7 +64,7 @@ fn describes_a_screen_as_schema_json() {
 #[ignore = "needs the models in $CROWN_CONTEXT_MODELS"]
 fn embeds_with_a_gguf_model() {
     let embedded = router()
-        .embed(vec!["display settings".into()], EmbedPurpose::Query, job())
+        .embed(vec!["display settings".into()], EmbedPurpose::Query, &job())
         .unwrap();
     let length: f32 = embedded
         .embeddings

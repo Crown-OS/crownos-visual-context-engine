@@ -22,7 +22,7 @@ use crownos_ipc::ServiceBuilder;
 use crownos_ipc::adapter::tokio::serve_with_outbox;
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::dispatch::{Dispatcher, RESIDENT, send_reply};
+use crate::dispatch::{Dispatcher, Outgoing, RESIDENT};
 use crate::engine::Engine;
 use crate::job_gate::JobGate;
 use crate::util::memory::memory_tier;
@@ -30,6 +30,8 @@ use crate::util::power::on_battery;
 
 /// How often the daemon reads the power state and checks for hung models.
 const WATCH_INTERVAL: Duration = Duration::from_secs(5);
+/// How soon a job ends after its client closed the connection.
+const PEER_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 const DEFAULT_MODELS_DIR: &str = "/usr/share/crownos/context/models";
 
@@ -82,7 +84,16 @@ async fn main() -> Result<()> {
 
     let (replies, mut outbox) = tokio::sync::mpsc::unbounded_channel();
     let gate = Arc::new(JobGate::default());
-    let dispatcher = Dispatcher::new(Arc::clone(&engine), replies, Arc::clone(&gate));
+    let dispatcher = Dispatcher::new(Arc::clone(&engine), replies.clone(), Arc::clone(&gate));
+    let peer_check = tokio::spawn(async move {
+        let mut ticks = tokio::time::interval(PEER_CHECK_INTERVAL);
+        loop {
+            ticks.tick().await;
+            if replies.send(Outgoing::CheckPeers).is_err() {
+                return;
+            }
+        }
+    });
     tokio::spawn(async move {
         if let Err(error) = sleep_guard::guard_sleep(gate).await {
             tracing::warn!(%error, "jobs are not ended before sleep");
@@ -99,7 +110,7 @@ async fn main() -> Result<()> {
             &mut server,
             |server, peer, message| dispatcher.dispatch(server, peer, message),
             |cx| outbox.poll_recv(cx),
-            send_reply,
+            |server, outgoing| dispatcher.send(server, outgoing),
         ) => served.context("the inference service stopped")?,
         _ = tokio::signal::ctrl_c() => tracing::info!("stopping"),
         _ = terminate.recv() => tracing::info!("stopping"),
@@ -110,6 +121,7 @@ async fn main() -> Result<()> {
         }
     }
     idle_unload.abort();
+    peer_check.abort();
     engine.save_benchmarks();
     Ok(())
 }

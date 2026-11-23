@@ -12,7 +12,7 @@ use context_protocol::{
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The job as the protocol carries it: the deadline becomes the time left, at least 1 ms.
-pub(crate) fn ticket(job: Job) -> JobTicket {
+pub(crate) fn ticket(job: &Job) -> JobTicket {
     let budget = job.deadline.saturating_duration_since(Instant::now());
     JobTicket {
         job_id: NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed),
@@ -34,6 +34,7 @@ pub(crate) fn error(failure: InferFailure) -> InferError {
             retry_after: Duration::from_millis(u64::from(retry_after_ms)),
         },
         InferFailure::InvalidInput(message) => InferError::InvalidInput(message),
+        InferFailure::Cancelled => InferError::Cancelled,
     }
 }
 
@@ -89,11 +90,11 @@ mod tests {
     #[test]
     fn a_deadline_becomes_the_time_left_and_busy_keeps_its_wait() {
         let job = Job::within(Duration::from_secs(2), Priority::Interactive);
-        let ticket = ticket(job);
+        let ticket = ticket(&job);
         assert!((1_900..=2_000).contains(&ticket.budget_ms));
         assert_eq!(ticket.priority, JobPriority::Interactive);
         let late = Job::within(Duration::ZERO, Priority::Background);
-        assert_eq!(super::ticket(late).budget_ms, 1);
+        assert_eq!(super::ticket(&late).budget_ms, 1);
         assert!(matches!(
             error(InferFailure::Busy { retry_after_ms: 250 }),
             InferError::Busy { retry_after } if retry_after == Duration::from_millis(250)

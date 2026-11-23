@@ -129,6 +129,10 @@ impl Handler for FakeInferd {
     fn unload(&mut self) -> Result<u32, RemoteError> {
         Ok(0)
     }
+
+    fn cancel(&mut self, _: u64) -> Result<bool, RemoteError> {
+        Ok(false)
+    }
 }
 
 fn start_fake(directory: &Path) {
@@ -165,7 +169,7 @@ fn every_task_reaches_inferd_with_sealed_frames() {
         PixelFormat::Xrgb8888,
     )
     .unwrap();
-    let lines = client.recognize_frame(&frame, job()).unwrap();
+    let lines = client.recognize_frame(&frame, &job()).unwrap();
     assert_eq!(lines[0].text, "2x1 Xrgb8888 [3, 2, 1, 0]");
 
     let image = Image::new(2, 1, 8, PixelFormat::Xrgb8888, pixels.into()).unwrap();

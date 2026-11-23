@@ -46,6 +46,8 @@ pub enum InferFailure {
         retry_after_ms: u32,
     },
     InvalidInput(String),
+    /// The client cancelled the job.
+    Cancelled,
 }
 
 pub type InferReply<T> = Result<T, InferFailure>;

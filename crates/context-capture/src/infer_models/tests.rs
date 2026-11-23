@@ -113,6 +113,10 @@ impl Handler for FakeInferd {
     fn unload(&mut self) -> Result<u32, RemoteError> {
         Ok(0)
     }
+
+    fn cancel(&mut self, _: u64) -> Result<bool, RemoteError> {
+        Ok(false)
+    }
 }
 
 fn serve(name: &str, mut fake: FakeInferd) -> (InferScreenModels, FakeInferd, PathBuf) {

@@ -9,7 +9,7 @@ Tags: **[V]** verified · **[A]** design decision.
 | `crownos_context_v1` (version 2), `crownos_capture_privacy_v1` | Wayland (custom XML in crownos-protocols) | crownpositor ↔ any granted client, many at once, each with its own scope; any app → compositor (privacy) |
 | `ext-image-copy-capture-v1`, `ext-foreign-toplevel-list-v1` | Wayland (standard, already implemented [V]) | crownpositor ↔ contextd |
 | **Context API** `crownos-visual-context` | **crownos-ipc**: Unix socket `$XDG_RUNTIME_DIR/crownos/crownos-visual-context.sock`, 20-byte header, postcard payloads, ≤ 16 fds via SCM_RIGHTS, Request/Reply/Notify/Subscribe/Event kinds, signature-hashed selectors [V]. Peer identity: `SO_PEERPIDFD` → `AppKey`, opt-in `SO_PASSPIDFD` per message, scope check per request ([05 §11.3](05-privacy-security.md#113-caller-identity-and-scopes)) | contextd ↔ any granted app: shell, agents, CLI, Inspector, crownbar |
-| Inference API `crownos-visual-context-infer` | crownos-ipc; bulk payloads (frames, text batches) in **sealed memfds** | contextd ↔ inferd. Any process of the same user can connect (crownos-ipc `SameUid`, socket `0600`); inferd checks no `AppKey` [V]. Received memfds must carry `F_SEAL_WRITE` [V] |
+| Inference API `crownos-visual-context-infer` | crownos-ipc; bulk payloads (frames, text batches) in **sealed memfds** | contextd ↔ inferd. Any process of the same user can connect (crownos-ipc `SameUid`, socket `0600`); inferd checks no `AppKey` [V]. A check by program does not work yet: contextd turns off `PR_SET_DUMPABLE`, so inferd cannot read its executable. `cancel(job_id)` ends a job of the same connection; a closed connection ends its jobs too [V]. Received memfds must carry `F_SEAL_WRITE` [V] |
 | Relay API `crownos-visual-context-relay` | crownos-ipc; text only | contextd ↔ relayd, which hosts the OpenAI-compatible HTTP backend (sidecars, LAN, cloud) |
 | Agent bridge | MCP over Unix socket (rmcp, as `crownui/mcp` [V]) | agents ↔ crown-context-mcp ↔ Context API |
 | Upstream services | crownos-ipc clients of `crownotify` (+ new `NotificationPosted`), `crownos-clipboard`; zbus for AT-SPI, UPower, power-profiles | contextd |
@@ -181,6 +181,7 @@ Slow subscribers drop events, never stall the service (crownos-ipc semantics [V]
 | `rerank(query, docs)` | ≤ 30 docs | scores |
 | `summarize_segments(batch)` | ≤ 8 segment digests (text only) | one `SegmentSummary` per segment, or `SchemaFailure` |
 | `unload(task?)` | — | — |
+| `cancel(job_id)` | — | whether the job of this connection was running. A waiting job does not run; a running model call ends by itself [V] |
 
 The methods are tasks of the task layer ([04 §10.4](04-inference.md#104-model-layer-in-context-infer)); none of them names a model. `generate` is a capability under the tasks, not a method here. relayd serves the same text-only tasks (`embed_text`, `rerank`, `summarize_segments`) through the HTTP backend; it never serves `recognize_text` or `describe_screen`. Every job carries `{job_id, priority: interactive|normal|batch, deadline}`; inferd may reject with `Busy{retry_after}`. A capture sends its model calls within a 4 s analysis budget and retries a busy call once inside it [V]. A frame that waits in the queue past its 60 s TTL is dropped and counted as `frame_dropped_unanalysed`.
 

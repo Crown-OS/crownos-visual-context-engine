@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use schemars::{JsonSchema, Schema};
@@ -91,11 +92,12 @@ pub enum Priority {
     Interactive,
 }
 
-/// When a call must finish and how urgent it is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// When a call must finish, how urgent it is, and what can end it sooner.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Job {
     pub deadline: Instant,
     pub priority: Priority,
+    pub cancel: JobCancel,
 }
 
 impl Job {
@@ -103,9 +105,33 @@ impl Job {
         Self {
             deadline: Instant::now() + budget,
             priority,
+            cancel: JobCancel::default(),
         }
     }
 }
+
+/// Ends a job before its deadline: a job that has not reached its model does not run, and the
+/// caller stops waiting for one that has.
+#[derive(Clone, Debug, Default)]
+pub struct JobCancel(Arc<AtomicBool>);
+
+impl JobCancel {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+impl PartialEq for JobCancel {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for JobCancel {}
 
 #[derive(Clone, Debug)]
 pub struct GenRequest {

@@ -8,6 +8,8 @@ pub enum InferError {
     Unavailable(Cow<'static, str>),
     #[error("the deadline passed before a result")]
     Timeout,
+    #[error("the job was cancelled")]
+    Cancelled,
     #[error("the backend failed: {0}")]
     Backend(String),
     #[error("the output does not match the schema: {0}")]

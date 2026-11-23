@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use context_infer::{
     ContextTasks, EmbedPurpose, EmbedSpace, EmbeddedTexts, Image, InferError, Job, Output,
@@ -8,10 +8,13 @@ use context_infer::{
 use context_protocol::InferReply;
 use context_protocol::inference::Client;
 use crownos_ipc::Pending;
+use rustix::event::{PollFd, PollFlags, Timespec};
 
 use crate::convert;
 use crate::frame::SealedFrame;
 
+/// How often a wait for inferd looks at the job's cancel token.
+const CANCEL_CHECK: Duration = Duration::from_millis(20);
 /// Time past the job budget that the client waits for inferd's own `Timeout`.
 const REPLY_SLACK: Duration = Duration::from_secs(5);
 const SUMMARY_TOKENS_PER_SEGMENT: u32 = 400;
@@ -21,6 +24,16 @@ const SEGMENTS_PER_REQUEST: usize = 5;
 const MAX_VECTOR_BYTES: usize = 768 * 1024;
 /// Small enough for vectors up to 4096 wide; later requests use the width of the first answer.
 const FIRST_EMBED_BATCH: usize = 48;
+
+/// Waits until the connection can be read, or `timeout` passes.
+fn wait_readable(client: &Client, timeout: Duration) -> Result<(), crownos_ipc::Error> {
+    let mut descriptors = [PollFd::new(client, PollFlags::IN)];
+    let timeout = Timespec::try_from(timeout).ok();
+    match rustix::event::poll(&mut descriptors, timeout.as_ref()) {
+        Ok(_) | Err(rustix::io::Errno::INTR) => Ok(()),
+        Err(error) => Err(crownos_ipc::Error::Io(error.into())),
+    }
+}
 
 /// Talks to crown-context-inferd. Each call opens its own connection, so calls from many
 /// threads never wait for each other here; inferd orders them.
@@ -39,7 +52,7 @@ impl InferdClient {
     pub fn recognize_frame(
         &self,
         frame: &SealedFrame,
-        job: Job,
+        job: &Job,
     ) -> Result<Vec<TextLine>, InferError> {
         let pixels = frame.descriptor()?;
         let lines = self.call(job, |client, ticket| {
@@ -54,7 +67,7 @@ impl InferdClient {
         frame: &SealedFrame,
         app_name: &str,
         window_title: &str,
-        job: Job,
+        job: &Job,
     ) -> Result<ScreenDescription, InferError> {
         let pixels = frame.descriptor()?;
         let summary = self.call(job, |client, ticket| {
@@ -77,10 +90,11 @@ impl InferdClient {
         .map_err(|error| InferError::Unavailable(format!("crown-context-inferd ({error})").into()))
     }
 
-    /// One request on a fresh connection, waited for until the budget and some slack end.
+    /// One request on a fresh connection, waited for until the budget and some slack end. A
+    /// cancelled job tells inferd to end it, then closes the connection.
     fn call<T: serde::de::DeserializeOwned>(
         &self,
-        job: Job,
+        job: &Job,
         start: impl FnOnce(
             &mut Client,
             context_protocol::JobTicket,
@@ -92,11 +106,24 @@ impl InferdClient {
             InferError::Unavailable(format!("crown-context-inferd ({error})").into())
         };
         let pending = start(&mut client, ticket).map_err(lost)?;
-        let wait = Duration::from_millis(u64::from(ticket.budget_ms)) + REPLY_SLACK;
-        client
-            .wait(pending, Some(wait))
-            .map_err(lost)?
-            .map_err(convert::error)
+        let deadline =
+            Instant::now() + Duration::from_millis(u64::from(ticket.budget_ms)) + REPLY_SLACK;
+        loop {
+            if let Some(answer) = client.take(&pending).map_err(lost)? {
+                return answer.map_err(convert::error);
+            }
+            if job.cancel.is_cancelled() {
+                let _ = client.cancel(ticket.job_id);
+                return Err(InferError::Cancelled);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(lost(crownos_ipc::Error::Timeout));
+            }
+            wait_readable(&client, left.min(CANCEL_CHECK)).map_err(lost)?;
+            client.handle_writable().map_err(lost)?;
+            client.handle_readable().map_err(lost)?;
+        }
     }
 }
 
@@ -105,7 +132,7 @@ impl InferdClient {
     fn summarize_request(
         &self,
         segments: &[SegmentDigest],
-        job: Job,
+        job: &Job,
     ) -> Result<Vec<SegmentSummary>, InferError> {
         let schema = Output::json_for::<SegmentSummaries>().schema_text();
         let max_tokens = SUMMARY_TOKENS_PER_SEGMENT
@@ -141,7 +168,7 @@ impl ContextTasks for InferdClient {
     ) -> Result<Vec<SegmentSummary>, InferError> {
         let mut summaries = Vec::with_capacity(segments.len());
         for request in segments.chunks(SEGMENTS_PER_REQUEST) {
-            summaries.extend(self.summarize_request(request, job)?);
+            summaries.extend(self.summarize_request(request, &job)?);
         }
         Ok(summaries)
     }
@@ -155,13 +182,13 @@ impl ContextTasks for InferdClient {
         window_title: &str,
         job: Job,
     ) -> Result<ScreenDescription, InferError> {
-        self.describe_frame(&SealedFrame::copy_of(screen)?, app_name, window_title, job)
+        self.describe_frame(&SealedFrame::copy_of(screen)?, app_name, window_title, &job)
     }
 
     /// Copies `image` once into a sealed memfd; use [`InferdClient::recognize_frame`] to
     /// send a frame that is already sealed.
     fn recognize_text(&self, image: &Image, job: Job) -> Result<Vec<TextLine>, InferError> {
-        self.recognize_frame(&SealedFrame::copy_of(image)?, job)
+        self.recognize_frame(&SealedFrame::copy_of(image)?, &job)
     }
 
     fn embed_text(
@@ -175,7 +202,7 @@ impl ContextTasks for InferdClient {
         let mut batch_size = FIRST_EMBED_BATCH;
         loop {
             let (request, rest) = remaining.split_at(batch_size.min(remaining.len()));
-            let answer = self.call(job, |client, ticket| {
+            let answer = self.call(&job, |client, ticket| {
                 client.embed_text(ticket, request.to_vec(), convert::purpose(purpose))
             })?;
             let answer = convert::embedded(answer)?;

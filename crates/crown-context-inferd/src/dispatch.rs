@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use context_infer::{
-    Capability, ContextTasks, GenRequest, InferError, Media, Output, PROMPT_TEMPLATES,
+    Capability, ContextTasks, GenRequest, InferError, JobCancel, Media, Output, PROMPT_TEMPLATES,
     PromptTemplate, Sampling, Task,
 };
 use context_protocol::inference;
@@ -41,7 +41,15 @@ pub(crate) struct Reply {
     payload: Result<Vec<u8>, RemoteError>,
 }
 
-pub(crate) fn send_reply(server: &mut Server, reply: Reply) {
+/// What the serve loop does with the server between requests.
+#[derive(Debug)]
+pub(crate) enum Outgoing {
+    Reply(Reply),
+    /// Cancels the jobs of the peers whose connection closed.
+    CheckPeers,
+}
+
+fn send_reply(server: &mut Server, reply: Reply) {
     let sent = match reply.payload {
         Ok(payload) => server.reply(reply.peer, reply.request_id, &payload, Vec::new()),
         Err(error) => server.reply_err(reply.peer, reply.request_id, &error),
@@ -56,7 +64,7 @@ pub(crate) fn send_reply(server: &mut Server, reply: Reply) {
 #[derive(Debug)]
 pub(crate) struct Dispatcher {
     engine: Arc<Engine>,
-    replies: UnboundedSender<Reply>,
+    replies: UnboundedSender<Outgoing>,
     fixed_cost: Admission,
     generation: Admission,
     gate: Arc<JobGate>,
@@ -65,7 +73,7 @@ pub(crate) struct Dispatcher {
 impl Dispatcher {
     pub(crate) fn new(
         engine: Arc<Engine>,
-        replies: UnboundedSender<Reply>,
+        replies: UnboundedSender<Outgoing>,
         gate: Arc<JobGate>,
     ) -> Self {
         Self {
@@ -74,6 +82,18 @@ impl Dispatcher {
             gate,
             fixed_cost: Admission::new(6, 2, Duration::from_millis(100)),
             generation: Admission::new(1, 1, Duration::from_secs(2)),
+        }
+    }
+
+    pub(crate) fn send(&self, server: &mut Server, outgoing: Outgoing) {
+        match outgoing {
+            Outgoing::Reply(reply) => send_reply(server, reply),
+            Outgoing::CheckPeers => {
+                let cancelled = self.gate.cancel_jobs_of_gone_peers(&server.peer_ids());
+                if cancelled > 0 {
+                    tracing::debug!(cancelled, "cancelled the jobs of closed connections");
+                }
+            }
         }
     }
 
@@ -90,13 +110,21 @@ impl Dispatcher {
         let selector = message.selector;
         let fixed = Some(&self.fixed_cost);
         let generation = Some(&self.generation);
-        if selector == inference::capabilities::SELECTOR {
+        if selector == inference::cancel::SELECTOR {
+            let Ok(call) = crownos_ipc::postcard::from_bytes::<inference::cancel>(&message.payload)
+            else {
+                server.drop_peer(peer);
+                return Ok(true);
+            };
+            let cancelled = self.gate.cancel(peer, call.job_id);
+            send_reply(server, reply(peer, message.req_id, &cancelled));
+        } else if selector == inference::capabilities::SELECTOR {
             self.run(
                 server,
                 peer,
                 message,
                 None,
-                |engine, _: inference::capabilities, _| capabilities(engine),
+                |engine, _: inference::capabilities, _, _| capabilities(engine),
             );
         } else if selector == inference::unload::SELECTOR {
             self.run(
@@ -104,7 +132,7 @@ impl Dispatcher {
                 peer,
                 message,
                 None,
-                |engine, _: inference::unload, _| {
+                |engine, _: inference::unload, _, _| {
                     u32::try_from(engine.router.unload_all()).unwrap_or(u32::MAX)
                 },
             );
@@ -114,9 +142,11 @@ impl Dispatcher {
                 peer,
                 message,
                 fixed,
-                |engine, call: inference::ocr, fds| {
+                |engine, call: inference::ocr, fds, cancel| {
                     let image = convert::image(call.image, first(&fds)?)?;
-                    let lines = engine.router.recognize_text(image, convert::job(call.job));
+                    let lines = engine
+                        .router
+                        .recognize_text(image, &convert::job(call.job, cancel));
                     lines.map(convert::lines).map_err(convert::failure)
                 },
             );
@@ -126,7 +156,7 @@ impl Dispatcher {
                 peer,
                 message,
                 fixed,
-                |engine, call: inference::embed_text, _| embed_text(engine, call),
+                |engine, call: inference::embed_text, _, cancel| embed_text(engine, call, cancel),
             );
         } else if selector == inference::rerank::SELECTOR {
             self.run(
@@ -134,9 +164,9 @@ impl Dispatcher {
                 peer,
                 message,
                 fixed,
-                |engine, call: inference::rerank, _| {
-                    let job = convert::job(call.job);
-                    let scores = engine.router.rerank(call.query, call.documents, job);
+                |engine, call: inference::rerank, _, cancel| {
+                    let job = convert::job(call.job, cancel);
+                    let scores = engine.router.rerank(call.query, call.documents, &job);
                     scores.map_err(convert::failure)
                 },
             );
@@ -146,10 +176,10 @@ impl Dispatcher {
                 peer,
                 message,
                 generation,
-                |engine, call: inference::generate, _| {
+                |engine, call: inference::generate, _, cancel| {
                     let template =
                         Template::new(call.template, call.vars, call.schema, call.max_tokens);
-                    generate(engine, call.job, &template, None)
+                    generate(engine, call.job, cancel, &template, None)
                 },
             );
         } else if selector == inference::generate_with_image::SELECTOR {
@@ -158,11 +188,11 @@ impl Dispatcher {
                 peer,
                 message,
                 generation,
-                |engine, call: inference::generate_with_image, fds| {
+                |engine, call: inference::generate_with_image, fds, cancel| {
                     let image = convert::image(call.image, first(&fds)?)?;
                     let template =
                         Template::new(call.template, call.vars, call.schema, call.max_tokens);
-                    generate(engine, call.job, &template, Some(image))
+                    generate(engine, call.job, cancel, &template, Some(image))
                 },
             );
         } else if selector == inference::describe_screen::SELECTOR {
@@ -171,9 +201,9 @@ impl Dispatcher {
                 peer,
                 message,
                 generation,
-                |engine, call: inference::describe_screen, fds| {
+                |engine, call: inference::describe_screen, fds, cancel| {
                     let image = convert::image(call.image, first(&fds)?)?;
-                    let job = convert::job(call.job);
+                    let job = convert::job(call.job, cancel);
                     let description = engine.tasks.describe_screen(
                         &image,
                         &call.app_name,
@@ -201,7 +231,7 @@ impl Dispatcher {
     ) where
         M: MethodMsg<Args = M> + JobMethod + DeserializeOwned + Send + 'static,
         M::Reply: Serialize + FromFailure + Send + 'static,
-        W: FnOnce(&Engine, M, Vec<OwnedFd>) -> M::Reply + Send + 'static,
+        W: FnOnce(&Engine, M, Vec<OwnedFd>, JobCancel) -> M::Reply + Send + 'static,
     {
         let Message {
             req_id: request_id,
@@ -217,14 +247,14 @@ impl Dispatcher {
             }
         };
         let ticket = call.ticket();
-        if self.gate.is_closed() {
+        let Some(running) = self.gate.enter(peer, ticket.map(|ticket| ticket.job_id)) else {
             drop(fds);
             let sleeping = M::Reply::from_failure(InferFailure::Unavailable(
                 "the system is going to sleep".into(),
             ));
             send_reply(server, reply(peer, request_id, &sleeping));
             return;
-        }
+        };
         let interactive = ticket.is_some_and(|ticket| ticket.priority == JobPriority::Interactive);
         let admitted = admission.map(|admission| admission.admit(interactive));
         let permit: Option<Permit> = match admitted.transpose() {
@@ -242,22 +272,14 @@ impl Dispatcher {
         if let Some(ticket) = ticket {
             tracing::debug!(job_id = ticket.job_id, priority = ?ticket.priority, "job admitted");
         }
-        let gate = Arc::clone(&self.gate);
         tokio::task::spawn_blocking(move || {
-            let Some(_running) = gate.enter() else {
-                drop(fds);
-                let sleeping = M::Reply::from_failure(InferFailure::Unavailable(
-                    "the system is going to sleep".into(),
-                ));
-                let _ = replies.send(reply(peer, request_id, &sleeping));
-                return;
-            };
-            let answer = work(&engine, call, fds);
+            let answer = work(&engine, call, fds, running.cancel_token());
+            drop(running);
             drop(permit);
             if let Some(ticket) = ticket {
                 tracing::debug!(job_id = ticket.job_id, "job done");
             }
-            let _ = replies.send(reply(peer, request_id, &answer));
+            let _ = replies.send(Outgoing::Reply(reply(peer, request_id, &answer)));
         });
     }
 }
@@ -378,6 +400,7 @@ fn capabilities(engine: &Engine) -> InferCapabilities {
 fn embed_text(
     engine: &Engine,
     call: inference::embed_text,
+    cancel: JobCancel,
 ) -> InferReply<context_protocol::EmbeddedBatch> {
     let dimensions = engine
         .router
@@ -389,10 +412,10 @@ fn embed_text(
             call.texts.len()
         )));
     }
-    let job = convert::job(call.job);
+    let job = convert::job(call.job, cancel);
     let embedded = engine
         .router
-        .embed(call.texts, convert::purpose(call.purpose), job);
+        .embed(call.texts, convert::purpose(call.purpose), &job);
     embedded.map(convert::embedded).map_err(convert::failure)
 }
 
@@ -423,6 +446,7 @@ impl Template {
 fn generate(
     engine: &Engine,
     ticket: JobTicket,
+    cancel: JobCancel,
     template: &Template,
     image: Option<context_infer::Image>,
 ) -> InferReply<String> {
@@ -438,7 +462,7 @@ fn generate(
             output,
             sampling: Sampling::default(),
             max_tokens: template.max_tokens.min(MAX_GENERATED_TOKENS),
-            job: convert::job(ticket),
+            job: convert::job(ticket, cancel),
         };
         Ok((prompt.task, request))
     };

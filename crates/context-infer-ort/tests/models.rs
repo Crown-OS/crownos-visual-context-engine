@@ -39,7 +39,7 @@ fn ocr_runs_every_tile_of_a_blank_screen() {
         vec![255; 1280 * 720 * 4].into(),
     )
     .unwrap();
-    assert!(router().recognize_text(blank, job()).unwrap().is_empty());
+    assert!(router().recognize_text(blank, &job()).unwrap().is_empty());
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn similar_texts_embed_close_together() {
         .embed(
             texts.iter().map(|text| (*text).to_owned()).collect(),
             EmbedPurpose::Document,
-            job(),
+            &job(),
         )
         .unwrap();
     let rows: Vec<&[f32]> = embedded.embeddings.rows().collect();

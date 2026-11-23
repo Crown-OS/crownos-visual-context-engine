@@ -2,8 +2,8 @@ use std::os::fd::OwnedFd;
 use std::time::{Duration, Instant};
 
 use context_infer::{
-    EmbedPurpose, EmbeddedTexts, Image, InferError, Job, PixelFormat, Priority, ScreenDescription,
-    SharedBytes, TextLine,
+    EmbedPurpose, EmbeddedTexts, Image, InferError, Job, JobCancel, PixelFormat, Priority,
+    ScreenDescription, SharedBytes, TextLine,
 };
 use context_protocol::{
     EmbeddedBatch, InferFailure, JobPriority, JobTicket, RecognizedLine, ScreenSummary,
@@ -17,7 +17,7 @@ const MAX_SIDE: u32 = 16_384;
 /// 64 megapixels: two 8K screens.
 const MAX_PIXELS: u64 = 64 << 20;
 
-pub(crate) fn job(ticket: JobTicket) -> Job {
+pub(crate) fn job(ticket: JobTicket, cancel: JobCancel) -> Job {
     let budget = ticket.budget_ms.min(MAX_BUDGET_MS);
     Job {
         deadline: Instant::now() + Duration::from_millis(u64::from(budget)),
@@ -25,6 +25,7 @@ pub(crate) fn job(ticket: JobTicket) -> Job {
             JobPriority::Background => Priority::Background,
             JobPriority::Interactive => Priority::Interactive,
         },
+        cancel,
     }
 }
 
@@ -70,6 +71,7 @@ pub(crate) fn failure(error: InferError) -> InferFailure {
             retry_after_ms: u32::try_from(retry_after.as_millis()).unwrap_or(u32::MAX),
         },
         InferError::InvalidInput(message) => InferFailure::InvalidInput(message),
+        InferError::Cancelled => InferFailure::Cancelled,
     }
 }
 

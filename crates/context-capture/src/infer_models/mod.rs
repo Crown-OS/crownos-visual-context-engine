@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use context_infer::{InferError, Job, PixelFormat, Priority};
+use context_infer::{InferError, Job, JobCancel, PixelFormat, Priority};
 use context_infer_client::{InferdClient, SealedFrame};
 
 use crate::cancellation::ModelCall;
@@ -39,12 +39,17 @@ impl InferScreenModels {
         let run = || {
             let client = self.client.clone();
             let attempt = attempt.clone();
+            let cancel = JobCancel::default();
             let job = Job {
                 deadline: call.deadline,
                 priority: Priority::Interactive,
+                cancel: cancel.clone(),
             };
-            call.wait_for(move || attempt(client, job))
-                .ok_or(ModelError::Cancelled)
+            let answer = call.wait_for(move || attempt(client, job));
+            if answer.is_none() {
+                cancel.cancel();
+            }
+            answer.ok_or(ModelError::Cancelled)
         };
         match run()? {
             Err(InferError::Busy { retry_after })
@@ -80,7 +85,9 @@ impl ScreenModels for InferScreenModels {
     ) -> Result<Vec<RecognizedLine>, ModelError> {
         let frame = Arc::new(sealed_frame(region)?);
         let origin = region.bounds();
-        let lines = self.call(call, move |client, job| client.recognize_frame(&frame, job))?;
+        let lines = self.call(call, move |client, job| {
+            client.recognize_frame(&frame, &job)
+        })?;
         Ok(lines
             .into_iter()
             .map(|line| RecognizedLine {
@@ -106,7 +113,7 @@ impl ScreenModels for InferScreenModels {
         let frame = Arc::new(sealed_frame(region)?);
         let (app_name, window_title) = (app_name.to_owned(), window_title.to_owned());
         let description = self.call(call, move |client, job| {
-            client.describe_frame(&frame, &app_name, &window_title, job)
+            client.describe_frame(&frame, &app_name, &window_title, &job)
         })?;
         Ok(ScreenSummary {
             content_kind: format!("{:?}", description.content_kind).to_ascii_lowercase(),

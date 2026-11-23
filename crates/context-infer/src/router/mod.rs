@@ -26,6 +26,7 @@ use crate::capability::{
 use crate::error::InferError;
 use crate::media::Image;
 use crate::registry::{Candidate, Capability, Registry};
+use crate::request::JobCancel;
 use crate::request::{GenRequest, Generation, Job};
 use crate::task::Task;
 
@@ -49,6 +50,8 @@ const MIN_HANG_TIME: Duration = Duration::from_secs(1);
 const MAX_ABANDONED_WORKERS: usize = 2;
 /// A caller that finds its model loading for another caller tries the next candidate.
 const LOADING_RETRY: Duration = Duration::from_millis(500);
+/// How often a wait for a model looks at the job's cancel token.
+const CANCEL_CHECK: Duration = Duration::from_millis(20);
 
 #[derive(Clone, Debug)]
 pub struct RouterSettings {
@@ -220,10 +223,10 @@ impl Router {
     }
 
     pub fn generate(&self, task: Task, request: GenRequest) -> Result<Generation, InferError> {
-        let job = request.job;
+        let job = request.job.clone();
         let units = u64::from(request.max_tokens);
         let request = Arc::new(request);
-        self.run::<dyn Generate, _>(task, job, units, move |generator| {
+        self.run::<dyn Generate, _>(task, &job, units, move |generator| {
             generator.generate(&request)
         })
         .map(|(generation, _)| generation)
@@ -233,7 +236,7 @@ impl Router {
         &self,
         texts: Vec<String>,
         purpose: EmbedPurpose,
-        job: Job,
+        job: &Job,
     ) -> Result<EmbeddedTexts, InferError> {
         let units = texts.iter().map(|text| text.len() as u64).sum();
         let ((reported_space, embeddings), candidate) =
@@ -256,7 +259,7 @@ impl Router {
         &self,
         query: String,
         documents: Vec<String>,
-        job: Job,
+        job: &Job,
     ) -> Result<Vec<f32>, InferError> {
         let units = documents
             .iter()
@@ -268,7 +271,7 @@ impl Router {
         .map(|(scores, _)| scores)
     }
 
-    pub fn recognize_text(&self, image: Image, job: Job) -> Result<Vec<TextLine>, InferError> {
+    pub fn recognize_text(&self, image: Image, job: &Job) -> Result<Vec<TextLine>, InferError> {
         let units = u64::from(image.width()) * u64::from(image.height());
         self.run::<dyn Ocr, _>(Task::RecognizeText, job, units, move |ocr| {
             ocr.recognize(&image)
@@ -276,7 +279,7 @@ impl Router {
         .map(|(lines, _)| lines)
     }
 
-    pub fn transcribe(&self, samples: Arc<[i16]>, job: Job) -> Result<String, InferError> {
+    pub fn transcribe(&self, samples: Arc<[i16]>, job: &Job) -> Result<String, InferError> {
         let units = samples.len() as u64;
         self.run::<dyn Transcribe, _>(Task::Transcribe, job, units, move |transcriber| {
             transcriber.transcribe(&samples)
@@ -325,7 +328,7 @@ impl Router {
     fn run<C, R>(
         &self,
         task: Task,
-        job: Job,
+        job: &Job,
         units: u64,
         call: impl Fn(&C) -> Result<R, InferError> + Send + Sync + 'static,
     ) -> Result<(R, Candidate), InferError>
@@ -336,6 +339,9 @@ impl Router {
         let call = Arc::new(call);
         let mut last_error = InferError::Unavailable(format!("a candidate for {task:?}").into());
         for candidate in self.ranked(task) {
+            if job.cancel.is_cancelled() {
+                return Err(InferError::Cancelled);
+            }
             let now = Instant::now();
             if now >= job.deadline {
                 return Err(InferError::Timeout);
@@ -360,7 +366,7 @@ impl Router {
             let attempt = Attempt {
                 task,
                 candidate: &candidate,
-                job,
+                job: job.clone(),
                 units,
                 expected,
             };
@@ -415,6 +421,7 @@ impl Router {
             });
         let (events, received) = mpsc::sync_channel(2);
         let deadline = attempt.job.deadline;
+        let cancel = attempt.job.cancel.clone();
         let run = Box::new(move |model: Result<&C, &InferError>| {
             let model = match model {
                 Ok(model) => model,
@@ -423,6 +430,13 @@ impl Router {
                     return;
                 }
             };
+            if cancel.is_cancelled() {
+                let _ = events.send(CallEvent::Finished(
+                    Err(InferError::Cancelled),
+                    Duration::ZERO,
+                ));
+                return;
+            }
             if Instant::now() >= deadline {
                 let _ = events.send(CallEvent::Finished(
                     Err(InferError::Timeout),
@@ -444,14 +458,16 @@ impl Router {
             self.settle::<C>(attempt, &key, Verdict::Inconclusive, fate, None);
             return Err(error);
         }
-        let wait_until = |limit: Instant| {
-            (limit + self.watchdog_grace).saturating_duration_since(Instant::now())
-        };
-        let mut event = received.recv_timeout(wait_until(deadline));
+        let cancel = &attempt.job.cancel;
+        let receive =
+            |limit: Instant| receive_until(&received, limit + self.watchdog_grace, cancel);
+        let mut event = receive(deadline);
         if let Ok(CallEvent::Started(started)) = event {
             let hang_at = started + hang_budget;
-            event = received.recv_timeout(wait_until(deadline.min(hang_at)));
-            if let Err(RecvTimeoutError::Timeout) = event {
+            event = receive(deadline.min(hang_at));
+            if let Err(RecvTimeoutError::Timeout) = event
+                && !cancel.is_cancelled()
+            {
                 let (verdict, fate) = if hang_at <= deadline {
                     (Verdict::Failed, WorkerFate::Abandon)
                 } else {
@@ -460,6 +476,10 @@ impl Router {
                 self.settle::<C>(attempt, &key, verdict, fate, None);
                 return Err(InferError::Timeout);
             }
+        }
+        if cancel.is_cancelled() && !matches!(event, Ok(CallEvent::Finished(..))) {
+            self.settle::<C>(attempt, &key, Verdict::Inconclusive, WorkerFate::Keep, None);
+            return Err(InferError::Cancelled);
         }
         let (result, verdict, fate, elapsed) = match event {
             Ok(CallEvent::Finished(Ok(value), elapsed)) => {
@@ -567,6 +587,25 @@ struct Attempt<'a> {
     job: Job,
     units: u64,
     expected: Option<Duration>,
+}
+
+/// The next event of a call, until `limit`. A cancelled job stops the wait within
+/// [`CANCEL_CHECK`] and reads as a timeout.
+fn receive_until<T>(
+    received: &mpsc::Receiver<T>,
+    limit: Instant,
+    cancel: &JobCancel,
+) -> Result<T, RecvTimeoutError> {
+    loop {
+        let left = limit.saturating_duration_since(Instant::now());
+        if left.is_zero() || cancel.is_cancelled() {
+            return Err(RecvTimeoutError::Timeout);
+        }
+        match received.recv_timeout(left.min(CANCEL_CHECK)) {
+            Err(RecvTimeoutError::Timeout) => {}
+            other => return other,
+        }
+    }
 }
 
 fn load<C: Loadable + ?Sized>(

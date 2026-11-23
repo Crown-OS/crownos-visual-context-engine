@@ -59,5 +59,8 @@ crownos_ipc::protocol! {
         fn describe_screen(job: JobTicket, image: SharedImage, app_name: String, window_title: String) fds(pixels) -> InferReply<ScreenSummary>;
         /// Unloads every model now; gives how many.
         fn unload() -> u32;
+        /// Ends the job `job_id` of this connection's client: a job that waits does not run,
+        /// and its memfds are unmapped and closed when it ends. Gives whether the job was known.
+        fn cancel(job_id: u64) -> bool;
     }
 }

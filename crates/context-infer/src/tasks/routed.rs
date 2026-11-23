@@ -93,7 +93,7 @@ impl ContextTasks for RoutedTasks {
     }
 
     fn recognize_text(&self, image: &Image, job: Job) -> Result<Vec<TextLine>, InferError> {
-        self.router.recognize_text(image.clone(), job)
+        self.router.recognize_text(image.clone(), &job)
     }
 
     fn embed_text(
@@ -102,7 +102,7 @@ impl ContextTasks for RoutedTasks {
         purpose: EmbedPurpose,
         job: Job,
     ) -> Result<EmbeddedTexts, InferError> {
-        self.router.embed(texts, purpose, job)
+        self.router.embed(texts, purpose, &job)
     }
 
     fn embed_space(&self) -> Option<EmbedSpace> {
