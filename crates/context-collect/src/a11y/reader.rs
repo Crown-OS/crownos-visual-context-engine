@@ -5,15 +5,18 @@ use atspi::{CacheItem, ObjectMatchRule, ObjectRefOwned, Role, SortOrder, StateSe
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::time::Instant;
+use zbus::names::BusName;
 use zbus::zvariant::{DynamicType, OwnedValue, Type};
 
 use super::calls::AtspiCall;
+use super::events::AccessibilityEvent;
 use super::health::ObjectHealth;
 use super::toolkit::Toolkit;
 
 /// A call that used up this much of the budget on its own marks its object hung.
 const HUNG_AFTER: Duration = Duration::from_millis(150);
 const CACHE_PATH: &str = "/org/a11y/atspi/cache";
+const REGISTRY: &str = "org.a11y.atspi.Registry";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReadError {
@@ -33,31 +36,88 @@ pub enum ReadError {
     Reply(#[from] zbus::zvariant::Error),
 }
 
-/// Every read of one application goes through here: the allowlist of its toolkit, the dead and
-/// hung objects, and the deadline of the read.
+/// The a11y bus. The connection never leaves this module: applications are called only through
+/// [`Reader::invoke`], and the bus itself only for pids, the registry and event subscriptions.
 #[derive(Debug)]
-pub(crate) struct Reader<'a> {
-    connection: &'a zbus::Connection,
-    toolkit: Toolkit,
-    health: &'a RefCell<ObjectHealth>,
-    deadline: Instant,
+pub(crate) struct AccessibilityBusConnection {
+    connection: zbus::Connection,
+    recorded_calls: Option<RefCell<Vec<AtspiCall>>>,
 }
 
-impl<'a> Reader<'a> {
-    pub(crate) const fn new(
-        connection: &'a zbus::Connection,
+impl AccessibilityBusConnection {
+    pub(crate) const fn new(connection: zbus::Connection) -> Self {
+        Self {
+            connection,
+            recorded_calls: None,
+        }
+    }
+
+    /// Keeps a list of every application call, for tests of the allowlist.
+    #[cfg(feature = "test-support")]
+    pub(crate) const fn recording(connection: zbus::Connection) -> Self {
+        Self {
+            connection,
+            recorded_calls: Some(RefCell::new(Vec::new())),
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn recorded_calls(&self) -> Vec<AtspiCall> {
+        self.recorded_calls
+            .as_ref()
+            .map(|calls| calls.borrow().clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) const fn reader<'a>(
+        &'a self,
         toolkit: Toolkit,
         health: &'a RefCell<ObjectHealth>,
         deadline: Instant,
-    ) -> Self {
-        Self {
-            connection,
+    ) -> Reader<'a> {
+        Reader {
+            bus: self,
             toolkit,
             health,
             deadline,
         }
     }
 
+    pub(crate) async fn subscribe(
+        &self,
+    ) -> Result<impl futures_util::Stream<Item = AccessibilityEvent> + Send + 'static, zbus::Error>
+    {
+        super::events::subscribe(&self.connection).await
+    }
+
+    /// The pid behind a unique name, from the bus daemon.
+    pub(crate) async fn process_of(&self, bus_name: &str) -> Option<i32> {
+        let dbus = zbus::fdo::DBusProxy::new(&self.connection).await.ok()?;
+        let name = BusName::try_from(bus_name).ok()?;
+        let pid = dbus.get_connection_unix_process_id(name).await.ok()?;
+        i32::try_from(pid).ok()
+    }
+
+    /// The unique name of the registry, whose root lists the applications.
+    pub(crate) async fn registry_name(&self) -> Option<String> {
+        let dbus = zbus::fdo::DBusProxy::new(&self.connection).await.ok()?;
+        let registry = BusName::try_from(REGISTRY).ok()?;
+        let owner = dbus.get_name_owner(registry).await.ok()?;
+        Some(owner.to_string())
+    }
+}
+
+/// Every read of one application goes through here: the allowlist of its toolkit, the dead and
+/// hung objects, and the deadline of the read.
+#[derive(Debug)]
+pub(crate) struct Reader<'a> {
+    bus: &'a AccessibilityBusConnection,
+    toolkit: Toolkit,
+    health: &'a RefCell<ObjectHealth>,
+    deadline: Instant,
+}
+
+impl Reader<'_> {
     pub(crate) const fn toolkit(&self) -> Toolkit {
         self.toolkit
     }
@@ -155,6 +215,9 @@ impl<'a> Reader<'a> {
         if !call.permitted(self.toolkit) {
             return Err(ReadError::NotPermitted(call));
         }
+        if let Some(calls) = &self.bus.recorded_calls {
+            calls.borrow_mut().push(call);
+        }
         let issued = Instant::now();
         if issued >= self.deadline {
             return Err(ReadError::OutOfTime);
@@ -166,7 +229,7 @@ impl<'a> Reader<'a> {
         let (interface, member) = call.wire();
         let reply = tokio::time::timeout_at(
             self.deadline,
-            self.connection.call_method(
+            self.bus.connection.call_method(
                 Some(destination),
                 object.path_as_str(),
                 Some(interface),

@@ -6,7 +6,7 @@ use crate::apps::AppResolver;
 /// The compositor window an accessible frame belongs to. The pid of the a11y connection picks
 /// the candidates, or, when the toolkit talks from another process of the same app (a sandbox
 /// proxy, a browser), the app the cgroup names. The frame title picks among them; without a
-/// title match only a focused or a single candidate is taken.
+/// title match only a single candidate is taken, so text never lands on the wrong window.
 pub(crate) fn match_window(
     windows: &WindowTable,
     resolver: &mut AppResolver,
@@ -31,13 +31,6 @@ pub(crate) fn match_window(
     if let Some(window) = candidates
         .iter()
         .find(|window| !title.is_empty() && window.title.trim() == title)
-    {
-        return Some(window.ident.clone());
-    }
-    let focused = windows.focus().map(|window| &window.ident);
-    if let Some(window) = candidates
-        .iter()
-        .find(|window| Some(&window.ident) == focused)
     {
         return Some(window.ident.clone());
     }
@@ -81,11 +74,13 @@ mod tests {
     }
 
     #[test]
-    fn without_a_title_match_the_focused_window_wins() {
+    fn focus_does_not_settle_an_ambiguous_title() {
         let mut windows = table();
         windows.set_focus(Some(WindowIdent("a".into())));
-        let ident = match_window(&windows, &mut resolver(), 10, "Untitled");
-        assert_eq!(ident, Some(WindowIdent("a".into())));
+        assert_eq!(
+            match_window(&windows, &mut resolver(), 10, "Untitled"),
+            None
+        );
     }
 
     #[test]

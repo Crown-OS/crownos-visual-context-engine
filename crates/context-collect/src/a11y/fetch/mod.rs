@@ -16,7 +16,6 @@ use super::reader::{ReadError, Reader};
 use super::toolkit::FetchStrategy;
 
 pub(crate) const NODE_BUDGET: usize = 2_000;
-pub(crate) const MAX_DEPTH: usize = 12;
 /// Requests in flight at once to one application.
 const IN_FLIGHT: usize = 32;
 
@@ -25,8 +24,11 @@ const IN_FLIGHT: usize = 32;
 pub(crate) struct Structure {
     pub(crate) nodes: Vec<NodeFacts>,
     pub(crate) strategy: FetchStrategy,
-    /// False when the node budget, the depth limit or the deadline cut the fetch short.
+    /// False when the node budget, the depth limit, the deadline or a failed call cut the fetch
+    /// short.
     pub(crate) complete: bool,
+    /// Some node did not say its role, so it may be a password field.
+    pub(crate) unknown_roles: bool,
 }
 
 #[derive(Debug)]
@@ -53,7 +55,7 @@ pub(crate) async fn fetch_structure(
     }
 }
 
-/// Never called once the structure showed a password field.
+/// Called only for a complete structure with no password field in it.
 pub(crate) async fn fetch_text(reader: &Reader<'_>, structure: &Structure) -> Text {
     let wanted: Vec<(usize, &NodeFacts)> = structure
         .nodes
@@ -116,4 +118,28 @@ pub(crate) async fn gather_until<T>(
         gathered.push(answer);
     }
     gathered
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn answers_after_the_deadline_are_left_out_and_the_rest_kept() {
+        let deadline = Instant::now() + Duration::from_millis(150);
+        let delays = [10u64, 600, 20, 700, 30];
+        let mut gathered = gather_until(
+            delays.iter().map(|delay| async move {
+                tokio::time::sleep(Duration::from_millis(*delay)).await;
+                *delay
+            }),
+            deadline,
+        )
+        .await;
+        gathered.sort_unstable();
+        assert_eq!(gathered, [10, 20, 30]);
+        assert!(Instant::now() < deadline + Duration::from_millis(100));
+    }
 }

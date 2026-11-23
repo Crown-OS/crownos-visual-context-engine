@@ -97,12 +97,6 @@ impl Subscription {
             self.interface, self.member
         )
     }
-
-    fn accepts(&self, interface: &str, member: &str, detail: &str) -> bool {
-        self.interface == interface
-            && self.member == member
-            && self.detail.is_none_or(|wanted| wanted == detail)
-    }
 }
 
 /// Adds the match rules on the bus and tells the registry which events to forward.
@@ -126,8 +120,9 @@ pub(crate) async fn subscribe(
         .filter_map(|message| std::future::ready(message.ok().as_ref().and_then(parse))))
 }
 
-/// Reads only the header and the first two body fields: the detail string and, for a state
-/// change, whether the state was gained. The changed text itself is never read.
+/// Reads the header, and the body only for the events filtered by detail: the detail string
+/// and, for a state change, whether the state was gained. A text change, which comes with every
+/// keystroke, is never deserialized, so the changed text itself is never read.
 pub(crate) fn parse(message: &Message) -> Option<AccessibilityEvent> {
     if message.message_type() != MessageType::Signal {
         return None;
@@ -135,19 +130,19 @@ pub(crate) fn parse(message: &Message) -> Option<AccessibilityEvent> {
     let header = message.header();
     let interface = header.interface()?.as_str();
     let member = header.member()?.as_str();
-    let body = message.body();
-    let fields: Structure<'_> = body.deserialize().ok()?;
-    let mut fields = fields.fields().iter();
-    let detail = match fields.next() {
-        Some(Value::Str(detail)) => detail.as_str(),
-        _ => "",
-    };
-    let subscription = SUBSCRIPTIONS
-        .iter()
-        .find(|subscription| subscription.accepts(interface, member, detail))?;
-    let gained = matches!(fields.next(), Some(Value::I32(1)));
-    if member == "StateChanged" && !gained {
-        return None;
+    let subscription = SUBSCRIPTIONS.iter().find(|subscription| {
+        subscription.interface == interface && subscription.member == member
+    })?;
+    if let Some(wanted) = subscription.detail {
+        let body = message.body();
+        let fields: Structure<'_> = body.deserialize().ok()?;
+        let mut fields = fields.fields().iter();
+        let detail_matches =
+            matches!(fields.next(), Some(Value::Str(detail)) if detail.as_str() == wanted);
+        let gained = matches!(fields.next(), Some(Value::I32(1)));
+        if !detail_matches || (member == "StateChanged" && !gained) {
+            return None;
+        }
     }
     let source =
         atspi::ObjectRef::new_owned(header.sender()?.to_owned(), header.path()?.to_owned());

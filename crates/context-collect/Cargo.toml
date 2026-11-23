@@ -21,3 +21,9 @@ tracing = { workspace = true }
 
 [lints]
 workspace = true
+
+[features]
+test-support = []
+
+[dev-dependencies]
+context-collect = { path = ".", features = ["test-support"] }

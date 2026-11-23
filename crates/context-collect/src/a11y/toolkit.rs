@@ -1,3 +1,6 @@
+const NATIVE_DEPTH: usize = 12;
+const WEB_DEPTH: usize = 24;
+
 /// The toolkit behind an application on the a11y bus, from its `ToolkitName` and `Version`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Toolkit {
@@ -38,6 +41,14 @@ impl Toolkit {
             Self::AtkBridge
         } else {
             Self::Unknown
+        }
+    }
+
+    /// How deep below the frame a fetch goes. Web content nests far deeper than native widgets.
+    pub const fn walk_depth(self) -> usize {
+        match self {
+            Self::Chromium | Self::Unknown => WEB_DEPTH,
+            Self::Gtk4 | Self::Qt | Self::AtkBridge => NATIVE_DEPTH,
         }
     }
 

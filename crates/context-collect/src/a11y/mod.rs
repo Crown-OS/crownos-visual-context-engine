@@ -18,8 +18,9 @@ mod dedup;
 mod events;
 mod fetch;
 mod health;
-mod host;
 mod node;
+#[cfg(feature = "test-support")]
+mod probe;
 mod read;
 mod reader;
 mod schedule;
@@ -30,17 +31,41 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use atspi::AccessibilityConnection;
+use context_core::{WindowIdent, WindowRecord};
 use futures_util::StreamExt;
 use tokio::sync::{mpsc, watch};
 
 pub use calls::AtspiCall;
-pub use host::{AccessibilityHost, compositor_allows_read};
-pub use read::{FrameContent, WindowReading, read_active_window};
+#[cfg(feature = "test-support")]
+pub use probe::{WindowReading, read_active_window};
+pub use read::FrameContent;
 pub use reader::ReadError;
 pub use toolkit::{FetchStrategy, Toolkit};
 
-use crate::Outlet;
+use crate::{CompositorLink, Outlet, WindowTable};
 use collector::Collector;
+use reader::AccessibilityBusConnection;
+
+/// What the collector needs from the rest of the engine: the windows, the focus, the policy and
+/// a way to flag a window sensitive.
+pub trait AccessibilityHost: Send + 'static {
+    fn with_windows<R>(&self, read: impl FnOnce(&WindowTable) -> R) -> R;
+
+    fn watch_focus(&self) -> watch::Receiver<Option<WindowIdent>>;
+
+    /// Whether the text of `window`, whose accessible frame is titled `frame_title`, may be read.
+    /// Asked before a read and again before its text is sent, so an excluded, private,
+    /// sensitive, locked or paused window is never read or sent.
+    fn may_read(&self, window: &WindowRecord, frame_title: &str) -> bool;
+
+    fn flag_sensitive(&self, window: &WindowIdent);
+}
+
+/// The compositor's own verdict: no read while paused or locked, of a sensitive window or of
+/// moving pictures. The engine's policy comes on top of this.
+pub fn compositor_allows_read(link: &CompositorLink, window: &WindowRecord) -> bool {
+    link.is_observing() && !window.sensitivity.any() && !window.content_type.is_motion()
+}
 
 const RETRY: Duration = Duration::from_secs(10);
 const QUEUED_EVENTS: usize = 1_024;
@@ -158,15 +183,15 @@ async fn run_once<H: AccessibilityHost>(
             AccessibilityConnection::from_address(address.as_str().try_into()?).await?
         }
     };
-    let connection = connection.connection().clone();
-    let events = events::subscribe(&connection).await?;
+    let bus = AccessibilityBusConnection::new(connection.connection().clone());
+    let events = bus.subscribe().await?;
     tracing::info!("reading text through the accessibility bus");
     let (forward, received) = mpsc::channel(QUEUED_EVENTS);
     let forwarder = tokio::spawn(events.for_each(move |event| {
         let _ = forward.try_send(event);
         std::future::ready(())
     }));
-    let outcome = Collector::new(connection, host, outlet.clone())
+    let outcome = Collector::new(bus, host, outlet.clone())
         .run(received, stop)
         .await;
     forwarder.abort();

@@ -1,6 +1,6 @@
 use atspi::ObjectRefOwned;
 
-use super::{MAX_DEPTH, NODE_BUDGET, Structure, gather_until};
+use super::{NODE_BUDGET, Structure, gather_until};
 use crate::a11y::node::NodeFacts;
 use crate::a11y::reader::{ReadError, Reader};
 use crate::a11y::toolkit::FetchStrategy;
@@ -10,16 +10,20 @@ use crate::a11y::toolkit::FetchStrategy;
 type TreePosition = Vec<u16>;
 
 /// Breadth first from the frame, one level at a time with every request of the level in flight
-/// together, inside the node budget, the depth limit and the deadline.
+/// together, inside the node budget, the toolkit's depth limit and the deadline.
 pub(super) async fn fetch(
     reader: &Reader<'_>,
     frame: &ObjectRefOwned,
 ) -> Result<Structure, ReadError> {
-    let (root, children) = visit(reader, frame).await?;
+    let (root, children) = match visit(reader, frame).await {
+        Visit::Seen { node, children, .. } => (node, children),
+        Visit::RoleUnknown(error) | Visit::Failed(error) => return Err(error),
+    };
     let mut nodes: Vec<(TreePosition, NodeFacts)> = vec![(TreePosition::new(), root)];
     let mut frontier = positioned(&[], children);
     let mut complete = true;
-    for _depth in 1..=MAX_DEPTH {
+    let mut unknown_roles = false;
+    for _depth in 1..=reader.toolkit().walk_depth() {
         if frontier.is_empty() {
             break;
         }
@@ -38,12 +42,26 @@ pub(super) async fn fetch(
         complete &= visited.len() == frontier.len();
         let mut next = Vec::new();
         for (position, outcome) in visited {
-            let Ok((node, children)) = outcome else {
-                continue;
+            let (node, children, children_complete) = match outcome {
+                Visit::Seen {
+                    node,
+                    children,
+                    children_complete,
+                } => (node, children, children_complete),
+                Visit::RoleUnknown(_) => {
+                    unknown_roles = true;
+                    complete = false;
+                    continue;
+                }
+                Visit::Failed(_) => {
+                    complete = false;
+                    continue;
+                }
             };
             if !node.is_shown() {
                 continue;
             }
+            complete &= children_complete;
             next.extend(positioned(position, children));
             nodes.push((position.clone(), node));
         }
@@ -55,27 +73,53 @@ pub(super) async fn fetch(
         nodes: nodes.into_iter().map(|(_, node)| node).collect(),
         strategy: FetchStrategy::BoundedWalk,
         complete,
+        unknown_roles,
     })
 }
 
-async fn visit(
-    reader: &Reader<'_>,
-    object: &ObjectRefOwned,
-) -> Result<(NodeFacts, Vec<ObjectRefOwned>), ReadError> {
+enum Visit {
+    Seen {
+        node: NodeFacts,
+        children: Vec<ObjectRefOwned>,
+        children_complete: bool,
+    },
+    /// The node may be anything, a password field too.
+    RoleUnknown(ReadError),
+    /// The role is known, but not whether the node is shown.
+    Failed(ReadError),
+}
+
+async fn visit(reader: &Reader<'_>, object: &ObjectRefOwned) -> Visit {
     let (role, name, states, children) = futures_util::join!(
         reader.role(object),
         reader.name(object),
         reader.state(object),
         reader.children(object),
     );
-    let node = NodeFacts {
-        object: object.clone(),
-        role: role?,
-        name: name.unwrap_or_default(),
-        states: states?,
-        has_text_interface: None,
+    let role = match role {
+        Ok(role) => role,
+        Err(error) => return Visit::RoleUnknown(error),
     };
-    Ok((node, children.unwrap_or_default()))
+    let states = match states {
+        Ok(states) => states,
+        Err(error) => return Visit::Failed(error),
+    };
+    let (children, children_complete) = match children {
+        Ok(children) => (children, true),
+        Err(ReadError::Unsupported) => (Vec::new(), true),
+        Err(_) => (Vec::new(), false),
+    };
+    Visit::Seen {
+        node: NodeFacts {
+            object: object.clone(),
+            role,
+            name: name.unwrap_or_default(),
+            states,
+            has_text_interface: None,
+        },
+        children,
+        children_complete,
+    }
 }
 
 fn positioned(

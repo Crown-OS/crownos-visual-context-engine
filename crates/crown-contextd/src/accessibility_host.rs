@@ -15,14 +15,14 @@ use crate::shared::Shared;
 #[derive(Debug)]
 pub(crate) struct ContextHost {
     link: CompositorLink,
-    policy: Policy,
+    policy: Arc<Policy>,
     shared: Arc<Mutex<Shared>>,
 }
 
 impl ContextHost {
     pub(crate) const fn new(
         link: CompositorLink,
-        policy: Policy,
+        policy: Arc<Policy>,
         shared: Arc<Mutex<Shared>>,
     ) -> Self {
         Self {
@@ -48,13 +48,74 @@ impl AccessibilityHost for ContextHost {
         self.link.watch_focus()
     }
 
-    fn may_read(&self, window: &WindowRecord) -> bool {
+    fn may_read(&self, window: &WindowRecord, frame_title: &str) -> bool {
         compositor_allows_read(&self.link, window)
             && self.policy.judge(window).allows_text()
+            && !self.policy.is_private_title(frame_title)
             && self.engine_observes()
     }
 
     fn flag_sensitive(&self, window: &WindowIdent) {
         self.link.flag_sensitive(window);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use context_core::Sensitivity;
+    use context_policy::VisualContext;
+
+    use super::*;
+
+    fn host() -> ContextHost {
+        let section = VisualContext {
+            enabled: true,
+            ..VisualContext::default()
+        };
+        ContextHost::new(
+            CompositorLink::default(),
+            Arc::new(Policy::from_section(&section).unwrap()),
+            Arc::new(Mutex::new(Shared::new(true))),
+        )
+    }
+
+    fn window(app_id: &str) -> WindowRecord {
+        WindowRecord {
+            ident: WindowIdent("w".into()),
+            app_id: app_id.into(),
+            title: "notes.txt".into(),
+            ..WindowRecord::default()
+        }
+    }
+
+    #[test]
+    fn an_ordinary_window_may_be_read() {
+        assert!(host().may_read(&window("org.gnome.TextEditor"), "notes.txt"));
+    }
+
+    #[test]
+    fn excluded_apps_private_frames_and_sensitive_windows_are_not_read() {
+        let host = host();
+        assert!(!host.may_read(&window("org.keepassxc.KeePassXC"), "Passwords"));
+        assert!(!host.may_read(&window("org.mozilla.firefox"), "Bank — Private Browsing"));
+        let mut sensitive = window("org.gnome.TextEditor");
+        sensitive.sensitivity = Sensitivity {
+            password_input: true,
+            ..Sensitivity::default()
+        };
+        assert!(!host.may_read(&sensitive, "notes.txt"));
+    }
+
+    #[test]
+    fn nothing_is_read_while_the_engine_is_paused() {
+        let host = host();
+        host.shared.lock().unwrap().paused = true;
+        assert!(!host.may_read(&window("org.gnome.TextEditor"), "notes.txt"));
     }
 }

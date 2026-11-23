@@ -19,12 +19,14 @@ pub const GTK4_TITLE: &str = "vcge a11y probe gtk4";
 pub const QT_TITLE: &str = "vcge a11y probe qt";
 pub const LABEL_TEXT: &str = "Probe label for the context engine";
 pub const BODY_TEXT: &str = "Probe body text that only the text view holds";
+pub const RETYPED_TEXT: &str =
+    "Quarterly budget review with revenue forecasts, office rent and travel per region";
 
 pub const GTK4_PROBE: &str = r#"
 import sys, gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk
-title, label, body, password, refocus = sys.argv[1:6]
+title, label, body, password, retyped = sys.argv[1:6]
 def build(app):
     window = Gtk.ApplicationWindow(application=app, title=title)
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -34,12 +36,10 @@ def build(app):
     box.append(view)
     if password == "1":
         box.append(Gtk.PasswordEntry())
-    entry = Gtk.Entry()
-    box.append(entry)
     window.set_child(box)
     window.present()
-    if refocus == "1":
-        GLib.timeout_add(3000, lambda: entry.grab_focus() and False)
+    if retyped:
+        GLib.timeout_add(3000, lambda: view.get_buffer().set_text(retyped) and False)
 app = Gtk.Application(application_id="org.crownos.VcgeProbeGtk4")
 app.connect("activate", build)
 app.run([])
@@ -119,6 +119,7 @@ impl PrivateSession {
         let mut daemon = Command::new("dbus-daemon")
             .args(["--session", "--nofork", "--print-address=1"])
             .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .env("GSETTINGS_BACKEND", "memory")
             .env_remove("DISPLAY")
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -174,6 +175,7 @@ impl PrivateSession {
         );
         let registry = Command::new("/usr/lib/at-spi2-registryd")
             .env("XDG_RUNTIME_DIR", &self.runtime_dir)
+            .env("GSETTINGS_BACKEND", "memory")
             .env("DBUS_SESSION_BUS_ADDRESS", &self.address)
             .env("AT_SPI_BUS_ADDRESS", &a11y)
             .stdout(Stdio::null())
@@ -185,12 +187,25 @@ impl PrivateSession {
         a11y
     }
 
+    /// The probe gets this session's runtime directory and buses only. Its display must be a
+    /// nested compositor outside `/run/user`, so no probe ever reaches the live desktop.
     pub fn launch(&self, program: &str, args: &[&str], extra_env: &[(&str, &str)]) -> Process {
         let display = std::env::var("WAYLAND_DISPLAY")
             .expect("run inside a nested crownpositor: WAYLAND_DISPLAY is not set");
+        assert!(
+            display.starts_with("/tmp/"),
+            "WAYLAND_DISPLAY must be the absolute socket of a nested compositor under /tmp, not {display}"
+        );
+        assert!(
+            !self.address.contains("/run/user/"),
+            "{} is a live bus",
+            self.address
+        );
         let mut command = Command::new(program);
         command
             .args(args)
+            .env("XDG_RUNTIME_DIR", &self.runtime_dir)
+            .env("GSETTINGS_BACKEND", "memory")
             .env("DBUS_SESSION_BUS_ADDRESS", &self.address)
             .env("WAYLAND_DISPLAY", display)
             .env_remove("WORKSPACE")

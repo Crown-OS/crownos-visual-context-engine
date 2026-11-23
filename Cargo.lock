@@ -384,6 +384,7 @@ name = "context-collect"
 version = "0.1.0"
 dependencies = [
  "atspi",
+ "context-collect",
  "context-core",
  "crownos-protocols",
  "futures-util",

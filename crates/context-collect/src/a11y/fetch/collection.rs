@@ -37,27 +37,31 @@ pub(super) async fn fetch(
         reader.deadline(),
     )
     .await;
-    let complete = described.len() == objects.len() && objects.len() < NODE_BUDGET;
-    let mut nodes: Vec<(usize, NodeFacts)> = described
-        .into_iter()
-        .filter_map(|(index, role, name)| {
-            let object = objects.get(index)?.clone();
-            Some((
-                index,
-                NodeFacts {
-                    object,
-                    role: role.ok()?,
-                    name: name.unwrap_or_default(),
-                    states: StateSet::new(State::Showing | State::Visible),
-                    has_text_interface: None,
-                },
-            ))
-        })
-        .collect();
+    let mut complete = described.len() == objects.len() && objects.len() < NODE_BUDGET;
+    let mut unknown_roles = false;
+    let mut nodes: Vec<(usize, NodeFacts)> = Vec::with_capacity(described.len());
+    for (index, role, name) in described {
+        let (Some(object), Ok(role)) = (objects.get(index), role) else {
+            unknown_roles = true;
+            complete = false;
+            continue;
+        };
+        nodes.push((
+            index,
+            NodeFacts {
+                object: object.clone(),
+                role,
+                name: name.unwrap_or_default(),
+                states: StateSet::new(State::Showing | State::Visible),
+                has_text_interface: None,
+            },
+        ));
+    }
     nodes.sort_unstable_by_key(|(index, _)| *index);
     Ok(Some(Structure {
         nodes: nodes.into_iter().map(|(_, node)| node).collect(),
         strategy: FetchStrategy::CollectionMatches,
         complete,
+        unknown_roles,
     }))
 }

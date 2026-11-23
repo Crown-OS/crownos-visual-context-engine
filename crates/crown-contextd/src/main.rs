@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
     if cli.replay.is_some() {
         section.enabled = true;
     }
-    let policy = Policy::from_section(&section).context("reading visual_context.ron")?;
+    let policy = Arc::new(Policy::from_section(&section).context("reading visual_context.ron")?);
     let state_dir = cli.state_dir.clone().unwrap_or_else(state_dir);
     let writer = Writer::spawn(Store::open_dir(&state_dir).context("opening the store")?)
         .context("starting the writer")?;
@@ -65,11 +65,7 @@ async fn main() -> Result<()> {
     let shared = Arc::new(Mutex::new(Shared::new(section.enabled)));
     let link = CompositorLink::default();
     let accessibility = if cli.replay.is_none() && section.enabled {
-        let host = ContextHost::new(
-            link.clone(),
-            Policy::from_section(&section).context("reading visual_context.ron")?,
-            Arc::clone(&shared),
-        );
+        let host = ContextHost::new(link.clone(), Arc::clone(&policy), Arc::clone(&shared));
         Some(
             AccessibilityCollector::spawn(outlet.clone(), host, AccessibilityBus::Session)
                 .context("starting the accessibility collector")?,

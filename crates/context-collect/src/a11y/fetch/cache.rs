@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use atspi::{CacheItem, Interface, ObjectRefOwned};
 
-use super::{MAX_DEPTH, NODE_BUDGET, Structure};
+use super::{NODE_BUDGET, Structure};
 use crate::a11y::node::NodeFacts;
 use crate::a11y::reader::{ReadError, Reader};
 use crate::a11y::toolkit::FetchStrategy;
@@ -17,11 +17,15 @@ pub(super) async fn fetch(
     frame: &ObjectRefOwned,
 ) -> Result<Option<Structure>, ReadError> {
     let items = reader.cache_items(application).await?;
-    Ok(shown_subtree(&items, frame))
+    Ok(shown_subtree(&items, frame, reader.toolkit().walk_depth()))
 }
 
 /// Depth first from `frame` in child index order, which is reading order.
-fn shown_subtree(items: &[CacheItem], frame: &ObjectRefOwned) -> Option<Structure> {
+fn shown_subtree(
+    items: &[CacheItem],
+    frame: &ObjectRefOwned,
+    max_depth: usize,
+) -> Option<Structure> {
     let mut children: HashMap<&ObjectRefOwned, Vec<&CacheItem>> = HashMap::new();
     let mut root = None;
     for item in items {
@@ -59,7 +63,7 @@ fn shown_subtree(items: &[CacheItem], frame: &ObjectRefOwned) -> Option<Structur
         if below.is_empty() {
             continue;
         }
-        if depth >= MAX_DEPTH {
+        if depth >= max_depth {
             complete = false;
             continue;
         }
@@ -69,6 +73,7 @@ fn shown_subtree(items: &[CacheItem], frame: &ObjectRefOwned) -> Option<Structur
         nodes,
         strategy: FetchStrategy::CacheItems,
         complete,
+        unknown_roles: false,
     })
 }
 
@@ -125,7 +130,7 @@ mod tests {
             item("/under-first", "/first", 0, 0, true),
             item("/elsewhere", "/other-frame", 0, 0, true),
         ];
-        let structure = shown_subtree(&items, &object("/frame")).unwrap();
+        let structure = shown_subtree(&items, &object("/frame"), 12).unwrap();
         let names: Vec<&str> = structure
             .nodes
             .iter()
@@ -139,11 +144,11 @@ mod tests {
     #[test]
     fn a_cache_that_misses_part_of_the_window_asks_for_a_walk() {
         let missing_frame = [item("/frame", "/root", 0, 0, true)];
-        assert!(shown_subtree(&missing_frame, &object("/gone")).is_none());
+        assert!(shown_subtree(&missing_frame, &object("/gone"), 12).is_none());
         let missing_child = [
             item("/frame", "/root", 0, 2, true),
             item("/first", "/frame", 0, 0, true),
         ];
-        assert!(shown_subtree(&missing_child, &object("/frame")).is_none());
+        assert!(shown_subtree(&missing_child, &object("/frame"), 12).is_none());
     }
 }

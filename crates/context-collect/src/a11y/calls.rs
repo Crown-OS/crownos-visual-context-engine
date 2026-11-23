@@ -3,7 +3,7 @@
 //! boxes, `GetAttributes` and `GetRelationSet` add extended properties. Those calls have no
 //! variant here, so the collector cannot make them.
 
-use super::toolkit::Toolkit;
+use super::toolkit::{FetchStrategy, Toolkit};
 
 const ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
 const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
@@ -39,7 +39,8 @@ impl AtspiCall {
         }
     }
 
-    pub const fn permitted(self, toolkit: Toolkit) -> bool {
+    /// The plain reads go to every toolkit; a bulk call only where the toolkit's strategy uses it.
+    pub fn permitted(self, toolkit: Toolkit) -> bool {
         match self {
             Self::Role
             | Self::Name
@@ -48,38 +49,26 @@ impl AtspiCall {
             | Self::WholeText
             | Self::DocumentUrl
             | Self::Toolkit => true,
-            Self::CollectionMatches => matches!(toolkit, Toolkit::Qt | Toolkit::AtkBridge),
-            Self::CacheItems => matches!(toolkit, Toolkit::Gtk4),
+            Self::CollectionMatches => toolkit.strategy() == FetchStrategy::CollectionMatches,
+            Self::CacheItems => toolkit.strategy() == FetchStrategy::CacheItems,
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const EVERY_CALL: [AtspiCall; 9] = [
-        AtspiCall::Role,
-        AtspiCall::Name,
-        AtspiCall::State,
-        AtspiCall::Children,
-        AtspiCall::WholeText,
-        AtspiCall::DocumentUrl,
-        AtspiCall::Toolkit,
-        AtspiCall::CollectionMatches,
-        AtspiCall::CacheItems,
+    /// Every call, so tests can check the whole list.
+    pub const ALL: [Self; 9] = [
+        Self::Role,
+        Self::Name,
+        Self::State,
+        Self::Children,
+        Self::WholeText,
+        Self::DocumentUrl,
+        Self::Toolkit,
+        Self::CollectionMatches,
+        Self::CacheItems,
     ];
 
-    const EVERY_TOOLKIT: [Toolkit; 5] = [
-        Toolkit::Gtk4,
-        Toolkit::Qt,
-        Toolkit::AtkBridge,
-        Toolkit::Chromium,
-        Toolkit::Unknown,
-    ];
-
-    /// The calls that raise Chromium's accessibility mode.
-    const MODE_RAISING: [(&str, &str); 12] = [
+    /// The calls that raise Chromium's accessibility mode. None of them is an [`AtspiCall`].
+    pub const MODE_RAISING: [(&'static str, &'static str); 12] = [
         ("org.a11y.atspi.Text", "GetTextAtOffset"),
         ("org.a11y.atspi.Text", "GetTextBeforeOffset"),
         ("org.a11y.atspi.Text", "GetTextAfterOffset"),
@@ -93,26 +82,56 @@ mod tests {
         ("org.a11y.atspi.Accessible", "GetRelationSet"),
         ("org.a11y.atspi.Document", "GetAttributes"),
     ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EVERY_TOOLKIT: [Toolkit; 5] = [
+        Toolkit::Gtk4,
+        Toolkit::Qt,
+        Toolkit::AtkBridge,
+        Toolkit::Chromium,
+        Toolkit::Unknown,
+    ];
+
+    /// Fails to compile when a call is added without a place in [`AtspiCall::ALL`].
+    const fn position(call: AtspiCall) -> usize {
+        match call {
+            AtspiCall::Role => 0,
+            AtspiCall::Name => 1,
+            AtspiCall::State => 2,
+            AtspiCall::Children => 3,
+            AtspiCall::WholeText => 4,
+            AtspiCall::DocumentUrl => 5,
+            AtspiCall::Toolkit => 6,
+            AtspiCall::CollectionMatches => 7,
+            AtspiCall::CacheItems => 8,
+        }
+    }
+
+    #[test]
+    fn the_list_holds_every_call_once() {
+        for (index, call) in AtspiCall::ALL.into_iter().enumerate() {
+            assert_eq!(position(call), index);
+        }
+    }
 
     #[test]
     fn no_call_raises_the_chromium_mode() {
-        for call in EVERY_CALL {
-            assert!(!MODE_RAISING.contains(&call.wire()), "{call:?}");
+        for call in AtspiCall::ALL {
+            assert!(!AtspiCall::MODE_RAISING.contains(&call.wire()), "{call:?}");
         }
     }
 
     #[test]
     fn chromium_and_unknown_toolkits_get_only_plain_reads() {
-        let plain = |call: &AtspiCall| {
-            !matches!(call, AtspiCall::CollectionMatches | AtspiCall::CacheItems)
-        };
+        let plain =
+            |call: AtspiCall| !matches!(call, AtspiCall::CollectionMatches | AtspiCall::CacheItems);
         for toolkit in [Toolkit::Chromium, Toolkit::Unknown] {
-            for call in EVERY_CALL {
-                assert_eq!(
-                    call.permitted(toolkit),
-                    plain(&call),
-                    "{toolkit:?} {call:?}"
-                );
+            for call in AtspiCall::ALL {
+                assert_eq!(call.permitted(toolkit), plain(call), "{toolkit:?} {call:?}");
             }
         }
     }

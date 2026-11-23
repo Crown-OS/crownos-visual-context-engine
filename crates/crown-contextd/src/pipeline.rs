@@ -46,7 +46,7 @@ impl Pipeline {
 
 pub(crate) fn spawn(
     observations: Receiver<Observation>,
-    policy: Policy,
+    policy: Arc<Policy>,
     writes: WriteHandle,
     shared: Arc<Mutex<Shared>>,
     events: UnboundedSender<Outgoing>,
@@ -79,7 +79,7 @@ pub(crate) fn spawn(
 }
 
 struct Worker {
-    policy: Policy,
+    policy: Arc<Policy>,
     writes: WriteHandle,
     shared: Arc<Mutex<Shared>>,
     events: UnboundedSender<Outgoing>,
@@ -105,6 +105,7 @@ impl Worker {
     }
 
     fn observe(&mut self, observation: Observation) {
+        let shows_secret = shows_secret(&observation.kind);
         let shared = Arc::clone(&self.shared);
         let Ok(mut shared) = shared.lock() else {
             return;
@@ -114,7 +115,7 @@ impl Worker {
             shared.observations_dropped += 1;
             return;
         }
-        let Some(observation) = self.admit(&shared, observation) else {
+        let Some(observation) = self.admit(&shared, observation, shows_secret) else {
             shared.observations_dropped += 1;
             return;
         };
@@ -161,13 +162,18 @@ impl Worker {
 
     /// The policy's say: whole observations dropped for excluded windows, text stripped for
     /// sensitive ones, and text with a secret in it dropped while its window is flagged.
-    fn admit(&self, shared: &Shared, observation: Observation) -> Option<Observation> {
+    fn admit(
+        &self,
+        shared: &Shared,
+        observation: Observation,
+        shows_secret: bool,
+    ) -> Option<Observation> {
         let verdict = |record: &WindowRecord| self.policy.judge(record);
         match &observation.kind {
             ObservationKind::WindowOpened(record) | ObservationKind::WindowChanged(record) => {
                 verdict(record).allows_metadata().then_some(observation)
             }
-            ObservationKind::Text { window, lines, .. } => {
+            ObservationKind::Text { window, .. } => {
                 let allowed = shared
                     .engine
                     .window(window)
@@ -175,7 +181,7 @@ impl Worker {
                 if !allowed {
                     return None;
                 }
-                if lines.iter().any(|line| !find_secrets(line).is_empty()) {
+                if shows_secret {
                     self.link.flag_sensitive(window);
                     return None;
                 }
@@ -259,10 +265,105 @@ impl Worker {
     }
 }
 
+/// Whether text holds a secret, in its lines or its URL. Scanned before the shared state is
+/// locked, so the API never waits on the scan.
+fn shows_secret(kind: &ObservationKind) -> bool {
+    let ObservationKind::Text { lines, url, .. } = kind else {
+        return false;
+    };
+    lines
+        .iter()
+        .chain(url)
+        .any(|text| !find_secrets(text).is_empty())
+}
+
 /// Input buckets live on in their segment's profile; everything else is an event row.
 const fn persisted(kind: &ObservationKind) -> bool {
     !matches!(
         kind,
         ObservationKind::InputActivity { .. } | ObservationKind::Text { .. }
     )
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use context_core::{TextSource, WindowIdent};
+    use context_policy::VisualContext;
+    use context_store::{Store, Writer};
+
+    use super::*;
+
+    const AWS_KEY: &str = "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
+    const JWT_URL: &str = "https://example.org/callback?token=eyJhbGciOiJIUzI1NiJ9.\
+        eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+
+    fn text(lines: &[&str], url: Option<&str>) -> Observation {
+        Observation::new(
+            Timestamp::now(),
+            ObservationKind::Text {
+                window: WindowIdent("w".into()),
+                source: TextSource::Accessibility,
+                url: url.map(str::to_owned),
+                lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+            },
+        )
+    }
+
+    #[test]
+    fn secrets_are_found_in_lines_and_in_the_url() {
+        assert!(shows_secret(&text(&[AWS_KEY], None).kind));
+        assert!(shows_secret(&text(&["plain"], Some(JWT_URL)).kind));
+        assert!(!shows_secret(
+            &text(&["plain notes"], Some("https://example.org/")).kind
+        ));
+    }
+
+    #[test]
+    fn admitted_text_with_a_secret_is_dropped() {
+        let state_dir =
+            std::env::temp_dir().join(format!("crown-contextd-pipeline-{}", std::process::id()));
+        let writer = Writer::spawn(Store::open_dir(&state_dir).unwrap()).unwrap();
+        let section = VisualContext {
+            enabled: true,
+            ..VisualContext::default()
+        };
+        let shared = Arc::new(Mutex::new(Shared::new(true)));
+        let (events, _outbox) = tokio::sync::mpsc::unbounded_channel();
+        let mut worker = Worker {
+            policy: Arc::new(Policy::from_section(&section).unwrap()),
+            writes: writer.handle(),
+            shared: Arc::clone(&shared),
+            events,
+            link: CompositorLink::default(),
+            apps: AppResolver::default(),
+            last_context: None,
+            pending_context: None,
+            last_snapshot: Instant::now(),
+        };
+        worker.observe(Observation::new(
+            Timestamp::now(),
+            ObservationKind::WindowOpened(WindowRecord {
+                ident: WindowIdent("w".into()),
+                app_id: "org.gnome.TextEditor".into(),
+                title: "notes.txt".into(),
+                ..WindowRecord::default()
+            }),
+        ));
+        let dropped = || shared.lock().unwrap().observations_dropped;
+        worker.observe(text(&["plain notes"], None));
+        assert_eq!(dropped(), 0);
+        worker.observe(text(&[AWS_KEY], None));
+        assert_eq!(dropped(), 1);
+        worker.observe(text(&["plain notes"], Some(JWT_URL)));
+        assert_eq!(dropped(), 2);
+        drop(worker);
+        drop(writer);
+        let _ = std::fs::remove_dir_all(state_dir);
+    }
 }
