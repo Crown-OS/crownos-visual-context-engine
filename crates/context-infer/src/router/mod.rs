@@ -173,6 +173,11 @@ impl Router {
         self.lock().loaded_models()
     }
 
+    /// The candidates a call for `task` would try now, best first.
+    pub fn routes(&self, task: Task) -> Vec<Candidate> {
+        self.ranked(task)
+    }
+
     /// The space `embed` uses now. A store that holds vectors from another space must
     /// embed its content again.
     pub fn embed_space(&self) -> Option<EmbedSpace> {

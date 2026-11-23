@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use schemars::{JsonSchema, Schema};
 
+use crate::error::InferError;
 use crate::media::Media;
 use crate::util::json_schema::schema_for;
 
@@ -46,6 +47,15 @@ pub enum Output {
 impl Output {
     pub fn json_for<T: JsonSchema>() -> Self {
         Self::Json(Arc::new(schema_for::<T>()))
+    }
+
+    /// A schema that another process sent as JSON text.
+    pub fn json_from_text(schema: &str) -> Result<Self, InferError> {
+        let value: serde_json::Value =
+            serde_json::from_str(schema).map_err(|error| InferError::Schema(error.to_string()))?;
+        let schema =
+            Schema::try_from(value).map_err(|error| InferError::Schema(error.to_string()))?;
+        Ok(Self::Json(Arc::new(schema)))
     }
 }
 

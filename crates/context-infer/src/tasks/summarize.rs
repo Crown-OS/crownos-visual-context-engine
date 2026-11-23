@@ -50,7 +50,8 @@ for a private log. Answer with JSON only, one entry in segments for each input s
 input order. activity_label is one of the label candidates when one fits. Keep facts that \
 stay true after today. Do not copy passwords, keys, tokens or other secrets.";
 
-pub(crate) fn summarize_prompt(segments: &[SegmentDigest]) -> String {
+/// The user message of `summarize_segments`: one block per segment.
+pub fn summarize_prompt(segments: &[SegmentDigest]) -> String {
     let mut prompt = String::new();
     for (number, segment) in segments.iter().enumerate() {
         let _ = writeln!(prompt, "## Segment {}", number + 1);

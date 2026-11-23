@@ -20,7 +20,7 @@ pub use capability::{
 pub use crownos_config::system::ai::{Device, Runtime};
 pub use error::InferError;
 pub use media::{Image, ImageLayoutError, Media, PixelFormat, SharedBytes};
-pub use registry::Registry;
+pub use registry::{Capability, Registry};
 pub use request::{GenRequest, Generation, Job, Message, Output, Priority, Role, Sampling};
 pub use router::{
     BenchmarkCache, BreakerSettings, EmbeddedTexts, LoadSpec, Policy, Router, RouterSettings,
@@ -28,6 +28,6 @@ pub use router::{
 };
 pub use task::Task;
 pub use tasks::{
-    ContentKind, ContextTasks, Entity, Fact, RoutedTasks, ScreenDescription, SegmentDigest,
-    SegmentSummary,
+    ContentKind, ContextTasks, Entity, Fact, PROMPT_TEMPLATES, PromptTemplate, RoutedTasks,
+    ScreenDescription, SegmentDigest, SegmentSummary, summarize_prompt,
 };

@@ -12,6 +12,7 @@ members = [
     "crates/context-shm",
     "crates/context-infer-ort",
     "crates/context-infer-llama",
+    "crates/crown-context-inferd",
     "crates/crown-contextd",
     "crates/crown-context",
     "eval",
@@ -34,6 +35,8 @@ context-engine = { path = "crates/context-engine" }
 context-eval = { path = "eval" }
 context-infer = { path = "crates/context-infer" }
 context-shm = { path = "crates/context-shm" }
+context-infer-ort = { path = "crates/context-infer-ort" }
+context-infer-llama = { path = "crates/context-infer-llama" }
 crownos-ipc = { path = "../crownos-ipc" }
 crownos-config = { path = "../crownos-config", default-features = false }
 crownos-protocols = { path = "../crownos-protocols", features = ["client"] }

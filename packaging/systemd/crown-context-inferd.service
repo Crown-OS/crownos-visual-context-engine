@@ -1,17 +1,34 @@
 [Unit]
 Description=CrownOS context inference worker
-After=crown-contextd.service
+Requires=crown-context-inferd.socket
+After=crown-context-inferd.socket
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/crown-context-inferd
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
+Restart=on-failure
+RestartSec=3
+# Models, prompts and pixels stay in this process: no network, no swap, no core dumps.
 PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX
-DeviceAllow=/dev/dri/* rw
-DeviceAllow=/dev/accel/* rw
-DeviceAllow=/dev/nvidia* rw
-CPUSchedulingPolicy=idle
-Nice=15
+MemorySwapMax=0
+LimitCORE=0
+LimitMEMLOCK=128M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+CacheDirectory=crownos/context
+ReadWritePaths=%C/crownos/context
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+DeviceAllow=char-drm rw
+DeviceAllow=char-accel rw
+DeviceAllow=char-kfd rw
+DeviceAllow=char-nvidia rw
+DeviceAllow=char-nvidiactl rw
+DeviceAllow=char-nvidia-uvm rw
+CPUWeight=20
+IOWeight=20
+Nice=10

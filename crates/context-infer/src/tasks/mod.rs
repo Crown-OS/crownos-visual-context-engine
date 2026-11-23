@@ -3,6 +3,7 @@
 mod describe;
 mod routed;
 mod summarize;
+mod templates;
 
 use crate::capability::{EmbedPurpose, EmbedSpace, TextLine};
 use crate::error::InferError;
@@ -12,7 +13,8 @@ use crate::router::EmbeddedTexts;
 
 pub use describe::{ContentKind, ScreenDescription};
 pub use routed::RoutedTasks;
-pub use summarize::{Entity, Fact, SegmentDigest, SegmentSummary};
+pub use summarize::{Entity, Fact, SegmentDigest, SegmentSummary, summarize_prompt};
+pub use templates::{PROMPT_TEMPLATES, PromptTemplate};
 
 pub trait ContextTasks: Send + Sync {
     /// One summary per segment, in input order.

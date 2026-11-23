@@ -1,0 +1,39 @@
+[package]
+name = "crown-context-inferd"
+description = "The inference worker of the visual context engine: OCR, embeddings and generation behind crownos-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "crown-context-inferd"
+path = "src/main.rs"
+
+[features]
+default = []
+vulkan = ["context-infer-llama/vulkan"]
+cuda = ["context-infer-llama/cuda"]
+rocm = ["context-infer-llama/rocm"]
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+context-infer = { workspace = true }
+context-infer-llama = { workspace = true }
+context-infer-ort = { workspace = true }
+context-protocol = { workspace = true }
+context-shm = { workspace = true }
+crownos-ipc = { workspace = true, features = ["tokio"] }
+listenfd = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "signal", "sync", "time"] }
+tracing = { workspace = true }
+tracing-journald = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+
+[lints]
+workspace = true
