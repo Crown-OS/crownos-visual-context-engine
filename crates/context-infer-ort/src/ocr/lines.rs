@@ -65,27 +65,33 @@ pub(super) fn split_into_pieces(
     pieces
 }
 
-/// Joins the texts of overlapping pieces: the longest end of one text that starts the next
-/// one is kept once.
-pub(super) fn merge_overlapping_texts(texts: &[&str]) -> String {
+/// How many characters two neighbouring pieces of one box can both hold: a character is
+/// about half the box height wide.
+pub(super) fn shared_characters(previous: &LinePiece, next: &LinePiece) -> usize {
+    let overlap = (previous.bounds.x + previous.bounds.width).saturating_sub(next.bounds.x);
+    (2 * overlap).div_ceil(next.bounds.height.max(1)) as usize
+}
+
+/// Joins the texts of overlapping pieces. Each part names how many characters it can share
+/// with the part before; the longest end of the text so far, up to that many characters,
+/// that starts the part is kept once. The cap keeps repeated text such as "-----" whole.
+pub(super) fn merge_overlapping_texts(parts: &[(&str, usize)]) -> String {
     let mut merged = String::new();
-    for text in texts {
-        let overlap = (1..=merged.chars().count().min(text.chars().count()))
+    for &(text, shared) in parts {
+        let byte_after = |count: usize| {
+            text.char_indices()
+                .nth(count)
+                .map_or(text.len(), |(index, _)| index)
+        };
+        let longest = shared.min(merged.chars().count()).min(text.chars().count());
+        let overlap = (1..=longest)
             .rev()
             .find(|&count| {
-                let start = text
-                    .char_indices()
-                    .nth(count)
-                    .map_or(text.len(), |(index, _)| index);
-                text.get(..start)
+                text.get(..byte_after(count))
                     .is_some_and(|prefix| merged.ends_with(prefix))
             })
             .unwrap_or(0);
-        let start = text
-            .char_indices()
-            .nth(overlap)
-            .map_or(text.len(), |(index, _)| index);
-        merged.push_str(text.get(start..).unwrap_or_default());
+        merged.push_str(text.get(byte_after(overlap)..).unwrap_or_default());
     }
     merged
 }
@@ -166,10 +172,46 @@ mod tests {
     #[test]
     fn overlapping_texts_join_without_repeats() {
         assert_eq!(
-            merge_overlapping_texts(&["the quick bro", "brown fox"]),
+            merge_overlapping_texts(&[("the quick br", 0), ("brown fox", 2)]),
             "the quick brown fox"
         );
-        assert_eq!(merge_overlapping_texts(&["ab", "cd"]), "abcd");
-        assert_eq!(merge_overlapping_texts(&["ü€", "€x"]), "ü€x");
+        assert_eq!(merge_overlapping_texts(&[("ab", 0), ("cd", 2)]), "abcd");
+        assert_eq!(merge_overlapping_texts(&[("ü€", 0), ("€x", 2)]), "ü€x");
+    }
+
+    #[test]
+    fn repeated_text_loses_at_most_the_shared_characters() {
+        assert_eq!(
+            merge_overlapping_texts(&[("-----", 0), ("-----", 2)]),
+            "--------"
+        );
+        assert_eq!(
+            merge_overlapping_texts(&[("0000", 0), ("0000", 1)]),
+            "0000000"
+        );
+    }
+
+    #[test]
+    fn a_character_cut_at_a_piece_edge_is_read_once() {
+        assert_eq!(
+            merge_overlapping_texts(&[("the quick bro", 0), ("own fox", 2)]),
+            "the quick brown fox"
+        );
+        assert_eq!(
+            merge_overlapping_texts(&[("the quick br", 0), ("own fox", 2)]),
+            "the quick brown fox"
+        );
+    }
+
+    #[test]
+    fn pieces_one_height_apart_share_two_characters() {
+        let bounds = TextBounds {
+            x: 0,
+            y: 0,
+            width: 4000,
+            height: 20,
+        };
+        let pieces = split_into_pieces(0, bounds, LINE_HEIGHT);
+        assert_eq!(shared_characters(&pieces[0], &pieces[1]), 2);
     }
 }

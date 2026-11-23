@@ -1,6 +1,7 @@
 //! PP-OCR on ONNX Runtime: a DB text detector on fixed-size tiles at native resolution, then
-//! a CTC recogniser on text lines in width buckets, each with a fixed batch size, so every
-//! shape is static. A line wider than the widest bucket is read in overlapping pieces.
+//! a CTC recogniser on text lines in width buckets. On static-shape devices each bucket runs
+//! a fixed batch size, so every shape compiles once. A line wider than the widest bucket is
+//! read in overlapping pieces.
 
 mod components;
 mod ctc;
@@ -15,6 +16,7 @@ use context_infer::registry::{Artifact, OnnxGraph};
 use context_infer::{Image, InferError, LoadSpec, Ocr, TextLine};
 use ort::environment::Environment;
 
+use crate::providers::has_static_shapes;
 use crate::session::GraphSession;
 use detect::TextDetector;
 use recognize::TextRecognizer;
@@ -49,6 +51,7 @@ impl PaddleOcr {
                 open(rec)?,
                 &rec.shapes,
                 &read_dictionary(&spec.models_dir.join(&dictionary.path))?,
+                has_static_shapes(spec.device),
             ),
         })
     }

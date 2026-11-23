@@ -43,6 +43,18 @@ pub(crate) fn device_is_usable(
         })
 }
 
+/// Whether `device` compiles one graph per input shape, so inputs must keep fixed shapes.
+pub(crate) const fn has_static_shapes(device: Device) -> bool {
+    matches!(
+        device,
+        Device::TensorRt
+            | Device::OpenVinoNpu
+            | Device::OpenVinoGpu
+            | Device::VitisAi
+            | Device::MiGraphX
+    )
+}
+
 /// The registrations that run a graph on `device`. Each fails the session instead of
 /// falling back in silence, so the router can try the next candidate.
 pub(crate) fn execution_providers(device: Device) -> Vec<ExecutionProviderDispatch> {

@@ -3,13 +3,13 @@ use std::collections::BTreeMap;
 use context_infer::{Image, InferError, TextBounds, TextLine};
 
 use super::ctc::Labels;
-use super::lines::{LinePiece, merge_overlapping_texts, split_into_pieces};
+use super::lines::{LinePiece, merge_overlapping_texts, shared_characters, split_into_pieces};
 use super::tensor::{BgrPlanes, run_single, sample_bilinear};
 use crate::session::GraphSession;
 
 const DEFAULT_LINE_HEIGHT: usize = 48;
-/// Line widths with a fixed batch each, so every recogniser shape is static and compiles
-/// once on NPUs and TensorRT. A wider line is cut into pieces of the widest bucket.
+/// Line widths with a fixed batch each, so on NPUs and TensorRT every recogniser shape is
+/// static and compiles once. A wider line is cut into pieces of the widest bucket.
 pub(super) const WIDTH_BUCKETS: [(usize, usize); 3] = [(320, 32), (640, 16), (960, 8)];
 pub(super) const WIDEST_BUCKET: usize = 960;
 const MIN_CONFIDENCE: f32 = 0.5;
@@ -19,6 +19,8 @@ pub(super) struct TextRecognizer {
     graph: GraphSession,
     line_height: usize,
     labels: Labels,
+    /// Static-shape devices get full batches; the others run only the lines there are.
+    pad_batches: bool,
 }
 
 /// The text read from one piece of a box.
@@ -33,6 +35,7 @@ impl TextRecognizer {
         graph: GraphSession,
         shapes: &BTreeMap<String, Vec<i64>>,
         dictionary: &str,
+        pad_batches: bool,
     ) -> Self {
         let line_height = shapes
             .values()
@@ -45,6 +48,7 @@ impl TextRecognizer {
             graph,
             line_height,
             labels: Labels::from_dictionary(dictionary),
+            pad_batches,
         }
     }
 
@@ -66,7 +70,12 @@ impl TextRecognizer {
         let mut readings = vec![PieceReading::default(); pieces.len()];
         for ((bucket, batch_size), members) in by_bucket {
             for batch in members.chunks(batch_size) {
-                self.recognize_batch(image, &pieces, bucket, batch_size, batch, &mut readings)?;
+                let run_size = if self.pad_batches {
+                    batch_size
+                } else {
+                    batch.len()
+                };
+                self.recognize_batch(image, &pieces, bucket, run_size, batch, &mut readings)?;
             }
         }
         Ok(join_pieces(boxes, &pieces, &readings))
@@ -134,11 +143,22 @@ fn join_pieces(
             .filter(|(piece, _)| piece.box_index == box_index)
             .map(|(_, reading)| reading)
             .collect();
-        let texts: Vec<&str> = box_readings
+        let box_pieces: Vec<&LinePiece> = pieces
             .iter()
-            .map(|reading| reading.text.as_str())
+            .filter(|piece| piece.box_index == box_index)
             .collect();
-        let text = merge_overlapping_texts(&texts);
+        let parts: Vec<(&str, usize)> = box_readings
+            .iter()
+            .enumerate()
+            .map(|(index, reading)| {
+                let shared = index
+                    .checked_sub(1)
+                    .and_then(|previous| box_pieces.get(previous).zip(box_pieces.get(index)))
+                    .map_or(0, |(previous, next)| shared_characters(previous, next));
+                (reading.text.as_str(), shared)
+            })
+            .collect();
+        let text = merge_overlapping_texts(&parts);
         let confidence = box_readings
             .iter()
             .map(|reading| reading.confidence)
