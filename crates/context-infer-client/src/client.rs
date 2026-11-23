@@ -1,15 +1,16 @@
 use std::path::PathBuf;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use context_infer::{
     ContextTasks, EmbedPurpose, EmbedSpace, EmbeddedTexts, Image, InferError, Job, Output,
     ScreenDescription, SegmentDigest, SegmentSummaries, SegmentSummary, TextLine, summarize_prompt,
 };
-use context_protocol::InferReply;
 use context_protocol::inference::Client;
+use context_protocol::{InferReply, JobTicket};
 use crownos_ipc::Pending;
-use rustix::event::{PollFd, PollFlags, Timespec};
 
+use crate::connection::{Command, Connector, Poller, SharedConnection};
 use crate::convert;
 use crate::frame::SealedFrame;
 
@@ -25,27 +26,30 @@ const MAX_VECTOR_BYTES: usize = 768 * 1024;
 /// Small enough for vectors up to 4096 wide; later requests use the width of the first answer.
 const FIRST_EMBED_BATCH: usize = 48;
 
-/// Waits until the connection can be read, or `timeout` passes.
-fn wait_readable(client: &Client, timeout: Duration) -> Result<(), crownos_ipc::Error> {
-    let mut descriptors = [PollFd::new(client, PollFlags::IN)];
-    let timeout = Timespec::try_from(timeout).ok();
-    match rustix::event::poll(&mut descriptors, timeout.as_ref()) {
-        Ok(_) | Err(rustix::io::Errno::INTR) => Ok(()),
-        Err(error) => Err(crownos_ipc::Error::Io(error.into())),
-    }
+/// Talks to crown-context-inferd over one shared connection. Calls from many threads go out
+/// together on it; inferd orders them.
+#[derive(Debug, Clone)]
+pub struct InferdClient {
+    connection: SharedConnection,
 }
 
-/// Talks to crown-context-inferd. Each call opens its own connection, so calls from many
-/// threads never wait for each other here; inferd orders them.
-#[derive(Debug, Clone, Default)]
-pub struct InferdClient {
-    socket_dir: Option<PathBuf>,
-}
+/// What [`InferdClient::exchange`] starts: one request on the connection.
+type Start<T> =
+    Box<dyn FnOnce(&mut Client) -> Result<Pending<T>, crownos_ipc::Error> + Send + 'static>;
 
 impl InferdClient {
-    /// `socket_dir` defaults to `$XDG_RUNTIME_DIR/crownos`.
-    pub const fn new(socket_dir: Option<PathBuf>) -> Self {
-        Self { socket_dir }
+    /// Connects now to the socket in `socket_dir` (default `$XDG_RUNTIME_DIR/crownos`), and
+    /// again the same way after the connection is lost.
+    pub fn new(socket_dir: Option<PathBuf>) -> Self {
+        Self::with_connector(Box::new(move || connect(socket_dir.as_deref())))
+    }
+
+    /// Connects now with `connector`, and with it again after the connection is lost. Call it
+    /// before the process turns off `PR_SET_DUMPABLE`, because inferd reads the peer's program.
+    pub fn with_connector(connector: Connector) -> Self {
+        Self {
+            connection: SharedConnection::open(connector),
+        }
     }
 
     /// OCR of a frame that is already in a sealed memfd.
@@ -54,9 +58,9 @@ impl InferdClient {
         frame: &SealedFrame,
         job: &Job,
     ) -> Result<Vec<TextLine>, InferError> {
-        let pixels = frame.descriptor()?;
-        let lines = self.call(job, |client, ticket| {
-            client.ocr(ticket, frame.layout(), pixels)
+        let (layout, pixels) = (frame.layout(), frame.descriptor()?);
+        let lines = self.call(job, move |client, ticket| {
+            client.ocr(ticket, layout, pixels)
         })?;
         Ok(convert::lines(lines))
     }
@@ -69,62 +73,102 @@ impl InferdClient {
         window_title: &str,
         job: &Job,
     ) -> Result<ScreenDescription, InferError> {
-        let pixels = frame.descriptor()?;
-        let summary = self.call(job, |client, ticket| {
-            client.describe_screen(
-                ticket,
-                frame.layout(),
-                app_name.to_owned(),
-                window_title.to_owned(),
-                pixels,
-            )
+        let (layout, pixels) = (frame.layout(), frame.descriptor()?);
+        let (app_name, window_title) = (app_name.to_owned(), window_title.to_owned());
+        let summary = self.call(job, move |client, ticket| {
+            client.describe_screen(ticket, layout, app_name, window_title, pixels)
         })?;
         convert::screen(summary)
     }
 
-    fn connect(&self) -> Result<Client, InferError> {
-        match &self.socket_dir {
-            Some(directory) => Client::connect_in(directory),
-            None => Client::connect(),
-        }
-        .map_err(|error| InferError::Unavailable(format!("crown-context-inferd ({error})").into()))
-    }
-
-    /// One request on a fresh connection, waited for until the budget and some slack end. A
-    /// cancelled job tells inferd to end it, then closes the connection.
-    fn call<T: serde::de::DeserializeOwned>(
+    /// One job on the shared connection, waited for until the budget and some slack end. A
+    /// cancelled job tells inferd to end it.
+    fn call<T: serde::de::DeserializeOwned + Send + 'static>(
         &self,
         job: &Job,
-        start: impl FnOnce(
-            &mut Client,
-            context_protocol::JobTicket,
-        ) -> Result<Pending<InferReply<T>>, crownos_ipc::Error>,
+        start: impl FnOnce(&mut Client, JobTicket) -> Result<Pending<InferReply<T>>, crownos_ipc::Error>
+        + Send
+        + 'static,
     ) -> Result<T, InferError> {
         let ticket = convert::ticket(job);
-        let mut client = self.connect()?;
-        let lost = |error: crownos_ipc::Error| {
-            InferError::Unavailable(format!("crown-context-inferd ({error})").into())
-        };
-        let pending = start(&mut client, ticket).map_err(lost)?;
-        let deadline =
-            Instant::now() + Duration::from_millis(u64::from(ticket.budget_ms)) + REPLY_SLACK;
-        loop {
-            if let Some(answer) = client.take(&pending).map_err(lost)? {
-                return answer.map_err(convert::error);
+        let wait = Duration::from_millis(u64::from(ticket.budget_ms)) + REPLY_SLACK;
+        let start: Start<InferReply<T>> = Box::new(move |client| start(client, ticket));
+        let cancelled = || job.cancel.is_cancelled();
+        match self.exchange(wait, cancelled, start) {
+            Err(InferError::Cancelled) => {
+                self.connection.send(Command::Cancel(ticket.job_id));
+                Err(InferError::Cancelled)
             }
-            if job.cancel.is_cancelled() {
-                let _ = client.cancel(ticket.job_id);
-                return Err(InferError::Cancelled);
-            }
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(lost(crownos_ipc::Error::Timeout));
-            }
-            wait_readable(&client, left.min(CANCEL_CHECK)).map_err(lost)?;
-            client.handle_writable().map_err(lost)?;
-            client.handle_readable().map_err(lost)?;
+            answer => answer?.map_err(convert::error),
         }
     }
+
+    /// Sends a request on the shared connection and waits up to `wait` for its reply, or until
+    /// `cancelled` says so.
+    fn exchange<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        wait: Duration,
+        cancelled: impl Fn() -> bool,
+        start: Start<T>,
+    ) -> Result<T, InferError> {
+        let (answer, answered) = mpsc::channel();
+        let begin = Box::new(move |client: Option<&mut Client>| -> Option<Poller> {
+            let Some(client) = client else {
+                let _ = answer.send(Err(crownos_ipc::Error::Disconnected));
+                return None;
+            };
+            let pending = match start(client) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    let _ = answer.send(Err(error));
+                    return None;
+                }
+            };
+            Some(Box::new(move |client: &mut Client| {
+                match client.take(&pending) {
+                    Ok(None) => return false,
+                    Ok(Some(reply)) => {
+                        let _ = answer.send(Ok(reply));
+                    }
+                    Err(error) => {
+                        let _ = answer.send(Err(error));
+                    }
+                }
+                true
+            }))
+        });
+        if !self.connection.send(Command::Begin(begin)) {
+            return Err(lost(&crownos_ipc::Error::Disconnected));
+        }
+        let deadline = Instant::now() + wait;
+        loop {
+            match answered.recv_timeout(CANCEL_CHECK) {
+                Ok(reply) => return reply.map_err(|error| lost(&error)),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(lost(&crownos_ipc::Error::Disconnected));
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            if cancelled() {
+                return Err(InferError::Cancelled);
+            }
+            if Instant::now() >= deadline {
+                return Err(lost(&crownos_ipc::Error::Timeout));
+            }
+        }
+    }
+}
+
+fn connect(socket_dir: Option<&std::path::Path>) -> Result<Client, InferError> {
+    match socket_dir {
+        Some(directory) => Client::connect_in(directory),
+        None => Client::connect(),
+    }
+    .map_err(|error| lost(&error))
+}
+
+fn lost(error: &crownos_ipc::Error) -> InferError {
+    InferError::Unavailable(format!("crown-context-inferd ({error})").into())
 }
 
 impl InferdClient {
@@ -138,7 +182,7 @@ impl InferdClient {
         let max_tokens = SUMMARY_TOKENS_PER_SEGMENT
             .saturating_mul(u32::try_from(segments.len()).unwrap_or(u32::MAX));
         let variables = vec![("segments".to_owned(), summarize_prompt(segments))];
-        let text = self.call(job, |client, ticket| {
+        let text = self.call(job, move |client, ticket| {
             client.generate(
                 ticket,
                 "summarize_segments".into(),
@@ -202,8 +246,9 @@ impl ContextTasks for InferdClient {
         let mut batch_size = FIRST_EMBED_BATCH;
         loop {
             let (request, rest) = remaining.split_at(batch_size.min(remaining.len()));
-            let answer = self.call(&job, |client, ticket| {
-                client.embed_text(ticket, request.to_vec(), convert::purpose(purpose))
+            let texts = request.to_vec();
+            let answer = self.call(&job, move |client, ticket| {
+                client.embed_text(ticket, texts, convert::purpose(purpose))
             })?;
             let answer = convert::embedded(answer)?;
             let row_bytes = answer.embeddings.dimensions.max(1) * size_of::<f32>();
@@ -230,9 +275,8 @@ impl ContextTasks for InferdClient {
     }
 
     fn embed_space(&self) -> Option<EmbedSpace> {
-        let mut client = self.connect().ok()?;
-        let pending = client.capabilities().ok()?;
-        let capabilities = client.wait(pending, Some(REPLY_SLACK)).ok()?;
+        let start: Start<_> = Box::new(|client| client.capabilities());
+        let capabilities = self.exchange(REPLY_SLACK, || false, start).ok()?;
         capabilities.embed_space?.parse().ok()
     }
 }

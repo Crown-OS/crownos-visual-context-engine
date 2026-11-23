@@ -1,6 +1,5 @@
 //! The capture pipeline as the daemon runs it: which capture may happen, and where its text goes.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::SyncSender;
 use std::time::Duration;
@@ -31,12 +30,11 @@ pub(crate) const SECRET_FLAG_DURATION: Duration = Duration::from_secs(10 * 60);
 /// Starts capture and analysis. Outcomes come back as observations through `outlet`, so they
 /// pass the same policy gate as everything else. Windows with a recent a11y reading in
 /// `readings` are not read by OCR.
-/// Models run in crown-context-inferd, found in `socket_dir` (default
-/// `$XDG_RUNTIME_DIR/crownos`).
+/// Models run in crown-context-inferd, reached through `inferd`.
 pub(crate) fn spawn(
     link: &CompositorLink,
     outlet: SyncSender<Observation>,
-    socket_dir: Option<PathBuf>,
+    inferd: InferdClient,
     readings: RecentReadings,
 ) -> Result<Arc<CaptureService>> {
     let deliver = move |outcome: CaptureOutcome| {
@@ -47,7 +45,7 @@ pub(crate) fn spawn(
         }
     };
     let parts = CaptureServiceParts {
-        models: Arc::new(InferScreenModels::new(InferdClient::new(socket_dir))),
+        models: Arc::new(InferScreenModels::new(inferd)),
         structured_text: Box::new(WindowStructuredText::new(readings)),
         on_battery: Box::new(on_battery),
         deliver: Box::new(deliver),

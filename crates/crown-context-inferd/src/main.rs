@@ -6,6 +6,7 @@ mod admission;
 mod convert;
 mod dispatch;
 mod engine;
+mod engine_peer;
 mod job_gate;
 mod logging;
 mod sleep_guard;
@@ -65,7 +66,8 @@ async fn main() -> Result<()> {
         cli.models.clone(),
         cli.ggml_modules.as_deref(),
     )?);
-    let mut builder = ServiceBuilder::new(context_protocol::INFERENCE_SERVICE);
+    let mut builder = ServiceBuilder::new(context_protocol::INFERENCE_SERVICE)
+        .authorizer(engine_peer::authorizer());
     if let Some(directory) = &cli.socket_dir {
         builder = builder.directory(directory);
     }

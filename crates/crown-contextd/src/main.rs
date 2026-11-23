@@ -7,6 +7,7 @@ mod accessibility_host;
 mod api;
 mod capture;
 mod capture_output;
+mod inferd_connection;
 mod local_sensitivity;
 mod logging;
 mod pipeline;
@@ -61,13 +62,22 @@ struct Cli {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     logging::init();
-    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
-        .context("turning off core dumps and ptrace for this process")?;
     let cli = Cli::parse();
     let mut section: VisualContext = crownos_config::load(VisualContext::SECTION);
     if cli.replay.is_some() {
         section.enabled = true;
     }
+    let link = if cli.replay.is_some() {
+        CompositorLink::with_engine_scope()
+    } else {
+        CompositorLink::default()
+    };
+    let observes_the_compositor = cli.replay.is_none() && section.enabled;
+    // inferd reads this program from /proc when it accepts, so connect while that works.
+    let inferd = observes_the_compositor
+        .then(|| inferd_connection::connect(link.clone(), cli.socket_dir.clone()));
+    rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+        .context("turning off core dumps and ptrace for this process")?;
     let policy = Arc::new(Policy::from_section(&section).context("reading visual_context.ron")?);
     let state_dir = cli.state_dir.clone().unwrap_or_else(state_dir);
     let writer = Writer::spawn(Store::open_dir(&state_dir).context("opening the store")?)
@@ -94,13 +104,8 @@ async fn main() -> Result<()> {
 
     let (outlet, observations) = mpsc::sync_channel(OBSERVATION_QUEUE);
     let shared = Arc::new(Mutex::new(Shared::new(section.enabled)));
-    let link = if cli.replay.is_some() {
-        CompositorLink::with_engine_scope()
-    } else {
-        CompositorLink::default()
-    };
     let readings = RecentReadings::default();
-    let accessibility = if cli.replay.is_none() && section.enabled {
+    let accessibility = if observes_the_compositor {
         let host = ContextHost::new(link.clone(), Arc::clone(&policy), Arc::clone(&shared));
         Some(
             AccessibilityCollector::spawn(
@@ -115,8 +120,8 @@ async fn main() -> Result<()> {
         None
     };
     // The capture pipeline sets the exposure hook before the bridge first connects.
-    let capturing = if cli.replay.is_none() && section.enabled {
-        let service = capture::spawn(&link, outlet.clone(), cli.socket_dir.clone(), readings)?;
+    let capturing = if let Some(inferd) = inferd {
+        let service = capture::spawn(&link, outlet.clone(), inferd, readings)?;
         tokio::spawn({
             let service = Arc::clone(&service);
             async move {

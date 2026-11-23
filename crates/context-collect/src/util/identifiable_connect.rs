@@ -8,14 +8,14 @@ use crate::bridge::ExposureHook;
 /// The longest the process stays readable, even when the compositor does not answer.
 const LONGEST_EXPOSURE: Duration = Duration::from_secs(3);
 
-/// The compositor learns which program a client is from `/proc/<pid>/exe` when it accepts the
-/// connection. A process that turned `PR_SET_DUMPABLE` off hides that link, so it is dumpable
+/// The compositor and inferd learn which program a client is from `/proc/<pid>/exe` when they
+/// accept the connection. A process that turned `PR_SET_DUMPABLE` off hides that link, so it is dumpable
 /// again only while `connect` runs, which must include a roundtrip. `exposure` holds the
 /// captures first, so no frame exists while the process is readable, and a watchdog ends the
 /// exposure after [`LONGEST_EXPOSURE`].
 ///
 /// This is temporary: it goes away when the compositor identifies the processes it spawned.
-pub(crate) fn connect_identifiable<T, E: From<ExposureRefused>>(
+pub fn connect_identifiable<T, E: From<ExposureRefused>>(
     exposure: Option<&ExposureHook>,
     connect: impl FnOnce() -> Result<T, E>,
 ) -> Result<T, E> {

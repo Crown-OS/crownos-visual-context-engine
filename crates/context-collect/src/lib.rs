@@ -18,4 +18,5 @@ pub use bridge::{
     Outlet, SensitiveReason,
 };
 pub use replay::replay;
+pub use util::identifiable_connect::connect_identifiable;
 pub use window_table::WindowTable;

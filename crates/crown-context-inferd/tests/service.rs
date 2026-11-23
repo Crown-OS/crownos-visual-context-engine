@@ -31,7 +31,7 @@ impl Drop for Daemon {
     }
 }
 
-fn start(directory: &Path, models: &Path) -> Daemon {
+fn start(directory: &Path, models: &Path, engine: &Path) -> Daemon {
     let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/registry.ron");
     let child = Command::new(env!("CARGO_BIN_EXE_crown-context-inferd"))
         .arg("--registry")
@@ -39,6 +39,7 @@ fn start(directory: &Path, models: &Path) -> Daemon {
         .arg("--socket-dir")
         .arg(directory)
         .env("CROWN_CONTEXT_MODELS", models)
+        .env("CROWN_CONTEXT_ENGINE", engine)
         .env("XDG_CONFIG_HOME", directory.join("config"))
         .env("XDG_CACHE_HOME", directory.join("cache"))
         .env("ORT_DYLIB_PATH", directory.join("no-onnxruntime.so"))
@@ -72,7 +73,8 @@ const fn ticket() -> JobTicket {
 fn answers_capabilities_and_refuses_what_it_cannot_run() {
     let directory = std::env::temp_dir().join(format!("inferd-service-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
-    let _daemon = start(&directory, &directory.join("models"));
+    let this_test = std::env::current_exe().unwrap();
+    let _daemon = start(&directory, &directory.join("models"), &this_test);
     let mut client = Client::connect_in(&directory).unwrap();
 
     let pending = client.capabilities().unwrap();
@@ -121,6 +123,23 @@ fn answers_capabilities_and_refuses_what_it_cannot_run() {
 }
 
 #[test]
+fn a_peer_that_is_not_crown_contextd_is_refused() {
+    let directory =
+        std::env::temp_dir().join(format!("inferd-service-{}-refused", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let _daemon = start(
+        &directory,
+        &directory.join("models"),
+        Path::new("/usr/bin/crown-contextd-elsewhere"),
+    );
+    let refused = Client::connect_in(&directory).and_then(|mut client| {
+        let pending = client.capabilities()?;
+        client.wait(pending, REPLY_TIMEOUT)
+    });
+    assert!(refused.is_err(), "{refused:?}");
+}
+
+#[test]
 #[ignore = "needs a summarize_segments model in $CROWN_CONTEXT_MODELS"]
 fn generates_schema_json_through_the_socket() {
     let directory = std::env::temp_dir().join(format!("inferd-generate-{}", std::process::id()));
@@ -130,7 +149,7 @@ fn generates_schema_json_through_the_socket() {
         std::fs::copy(user_override, user_config.join("models.ron")).unwrap();
     }
     let models = PathBuf::from(std::env::var_os("CROWN_CONTEXT_MODELS").unwrap());
-    let _daemon = start(&directory, &models);
+    let _daemon = start(&directory, &models, &std::env::current_exe().unwrap());
     let mut client = Client::connect_in(&directory).unwrap();
     let schema = r#"{"type": "object", "properties": {"segments": {"type": "array", "items": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}}}, "required": ["segments"]}"#;
     let vars = vec![(
