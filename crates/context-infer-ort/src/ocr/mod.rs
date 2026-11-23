@@ -1,6 +1,6 @@
 //! PP-OCR on ONNX Runtime: a DB text detector on fixed-size tiles at native resolution, then
-//! a CTC recogniser on text lines batched by width bucket. Fixed shapes keep NPU and TensorRT
-//! graphs compiled once.
+//! a CTC recogniser on text lines batched by width bucket. The tile size, the line height and
+//! the three widths keep the shapes few; the batch size of the recogniser still varies.
 
 mod components;
 mod ctc;

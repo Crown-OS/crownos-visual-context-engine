@@ -13,7 +13,11 @@ pub use sender::share_read_only;
 
 use rustix::fs::SealFlags;
 
-/// The seals a shared memfd must carry: no new writes, no size change.
+/// The seals [`share_read_only`] puts on: no new writes, no size change.
 pub const REQUIRED_SEALS: SealFlags = SealFlags::FUTURE_WRITE
     .union(SealFlags::SHRINK)
     .union(SealFlags::GROW);
+
+/// Either seal stops writes: `WRITE` also refuses existing writable mappings.
+const WRITE_SEALS: SealFlags = SealFlags::WRITE.union(SealFlags::FUTURE_WRITE);
+const SIZE_SEALS: SealFlags = SealFlags::SHRINK.union(SealFlags::GROW);

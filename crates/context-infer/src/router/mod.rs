@@ -37,7 +37,7 @@ pub use policy::Policy;
 use breaker::Verdict;
 use loadable::Loadable;
 use state::{LoadedKey, RouterState};
-use worker::{JobSender, ModelWorker};
+use worker::{JobSender, ModelJob, ModelWorker};
 
 /// A call to a loaded model that takes this many times its measured latency, and at least
 /// [`MIN_HANG_TIME`], counts as hung, so the router can still try the next candidate.
@@ -57,6 +57,9 @@ pub struct RouterSettings {
     /// Extra time a call gets past its deadline to stop by itself before the watchdog gives
     /// up on it.
     pub watchdog_grace: Duration,
+    /// A call with no measured latency counts as hung after this long. A call that only
+    /// outlasts its caller's deadline keeps running and keeps its model.
+    pub unmeasured_call_limit: Duration,
 }
 
 impl RouterSettings {
@@ -67,6 +70,7 @@ impl RouterSettings {
             benchmarks: BenchmarkCache::default(),
             breaker: BreakerSettings::default(),
             watchdog_grace: Duration::from_millis(250),
+            unmeasured_call_limit: Duration::from_secs(600),
         }
     }
 }
@@ -85,6 +89,7 @@ pub struct Router {
     models_dir: Arc<Path>,
     breaker_settings: BreakerSettings,
     watchdog_grace: Duration,
+    unmeasured_call_limit: Duration,
     abandoned_workers: Arc<AtomicUsize>,
     state: Mutex<RouterState>,
 }
@@ -145,6 +150,7 @@ impl Router {
             models_dir: Arc::from(settings.models_dir),
             breaker_settings: settings.breaker,
             watchdog_grace: settings.watchdog_grace,
+            unmeasured_call_limit: settings.unmeasured_call_limit,
             abandoned_workers: Arc::new(AtomicUsize::new(0)),
             state: Mutex::new(RouterState::new(settings.policy, settings.benchmarks)),
         }
@@ -353,8 +359,9 @@ impl Router {
         Err(last_error)
     }
 
-    /// One call on one candidate, on the model's own thread. A wait that ends in the load or
-    /// in the queue is inconclusive; a wait that ends in the call means the model hung.
+    /// One call on one candidate, on the model's own thread. A wait that ends in the load, in
+    /// the queue or at the caller's deadline is inconclusive; a call that passes its hang
+    /// budget means the model hung, also when a later caller finds it so.
     fn attempt<C, R>(
         &self,
         attempt: &Attempt<'_>,
@@ -372,42 +379,54 @@ impl Router {
                 return Err(error);
             }
         };
+        if sender.is_hung(Instant::now()) {
+            self.settle::<C>(attempt, &key, Verdict::Failed, WorkerFate::Abandon, None);
+            return Err(InferError::Backend(
+                "the model hangs in an earlier call".into(),
+            ));
+        }
+        let hang_budget = attempt
+            .expected
+            .map_or(self.unmeasured_call_limit, |latency| {
+                (latency * HANG_FACTOR).max(MIN_HANG_TIME)
+            });
         let (events, received) = mpsc::sync_channel(2);
         let deadline = attempt.job.deadline;
-        sender.send(
-            attempt.job.priority,
-            Box::new(move |model| {
-                let model = match model {
-                    Ok(model) => model,
-                    Err(load_error) => {
-                        let _ = events.send(CallEvent::LoadFailed(load_error.clone()));
-                        return;
-                    }
-                };
-                if Instant::now() >= deadline {
-                    let _ = events.send(CallEvent::Finished(
-                        Err(InferError::Timeout),
-                        Duration::ZERO,
-                    ));
+        let run = Box::new(move |model: Result<&C, &InferError>| {
+            let model = match model {
+                Ok(model) => model,
+                Err(load_error) => {
+                    let _ = events.send(CallEvent::LoadFailed(load_error.clone()));
                     return;
                 }
-                let started = Instant::now();
-                let _ = events.send(CallEvent::Started(started));
-                let result = call(model);
-                let _ = events.send(CallEvent::Finished(result, started.elapsed()));
-            }),
-        );
+            };
+            if Instant::now() >= deadline {
+                let _ = events.send(CallEvent::Finished(
+                    Err(InferError::Timeout),
+                    Duration::ZERO,
+                ));
+                return;
+            }
+            let started = Instant::now();
+            let _ = events.send(CallEvent::Started(started));
+            let result = call(model);
+            let _ = events.send(CallEvent::Finished(result, started.elapsed()));
+        });
+        sender.send(attempt.job.priority, ModelJob { hang_budget, run });
         let wait_until = |limit: Instant| {
             (limit + self.watchdog_grace).saturating_duration_since(Instant::now())
         };
         let mut event = received.recv_timeout(wait_until(deadline));
         if let Ok(CallEvent::Started(started)) = event {
-            let hang_limit = attempt.expected.map_or(deadline, |latency| {
-                deadline.min(started + (latency * HANG_FACTOR).max(MIN_HANG_TIME))
-            });
-            event = received.recv_timeout(wait_until(hang_limit));
+            let hang_at = started + hang_budget;
+            event = received.recv_timeout(wait_until(deadline.min(hang_at)));
             if let Err(RecvTimeoutError::Timeout) = event {
-                self.settle::<C>(attempt, &key, Verdict::Failed, WorkerFate::Abandon, None);
+                let (verdict, fate) = if hang_at <= deadline {
+                    (Verdict::Failed, WorkerFate::Abandon)
+                } else {
+                    (Verdict::Inconclusive, WorkerFate::Keep)
+                };
+                self.settle::<C>(attempt, &key, verdict, fate, None);
                 return Err(InferError::Timeout);
             }
         }

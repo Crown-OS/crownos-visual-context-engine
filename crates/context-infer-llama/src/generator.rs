@@ -113,6 +113,7 @@ impl GgufGenerator {
         prompt: String,
         media: &[Media],
         budget: u32,
+        deadline: Instant,
     ) -> Result<i32, InferError> {
         if media.is_empty() {
             let tokens = self.model.vocab().tokenize(prompt.as_bytes(), true, true);
@@ -120,6 +121,9 @@ impl GgufGenerator {
             let mut batch = LlamaBatch::new(BATCH_TOKENS as usize, 1);
             let mut position = 0;
             for chunk in tokens.chunks(BATCH_TOKENS as usize) {
+                if Instant::now() >= deadline {
+                    return Err(InferError::Timeout);
+                }
                 batch.clear();
                 for (offset, &token) in chunk.iter().enumerate() {
                     let is_last = position + offset + 1 == tokens.len();
@@ -212,8 +216,13 @@ impl Generate for GgufGenerator {
             .model
             .new_context(&self.backend, params)
             .map_err(|error| backend_error("creating the context", error))?;
-        let mut position =
-            self.eval_prompt(&mut context, prompt, &request.media, request.max_tokens)?;
+        let mut position = self.eval_prompt(
+            &mut context,
+            prompt,
+            &request.media,
+            request.max_tokens,
+            request.job.deadline,
+        )?;
         let prompt_tokens = u32::try_from(position).unwrap_or(u32::MAX);
         let mut sampler = sampler(&self.model, &request.output, request.sampling)?;
         let vocab = self.model.vocab();

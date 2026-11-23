@@ -8,7 +8,9 @@ use context_infer::{
     PromptTemplate, Sampling, Task,
 };
 use context_protocol::inference;
-use context_protocol::{InferCapabilities, InferFailure, InferReply, JobTicket, TaskRoute};
+use context_protocol::{
+    InferCapabilities, InferFailure, InferReply, JobPriority, JobTicket, TaskRoute,
+};
 use crownos_ipc::{Kind, Message, MethodMsg, PeerId, RemoteError, Server};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -63,8 +65,8 @@ impl Dispatcher {
         Self {
             engine,
             replies,
-            fixed_cost: Admission::new(8, Duration::from_millis(100)),
-            generation: Admission::new(2, Duration::from_secs(2)),
+            fixed_cost: Admission::new(6, 2, Duration::from_millis(100)),
+            generation: Admission::new(1, 1, Duration::from_secs(2)),
         }
     }
 
@@ -190,7 +192,7 @@ impl Dispatcher {
         admission: Option<&Admission>,
         work: W,
     ) where
-        M: MethodMsg<Args = M> + DeserializeOwned + Send + 'static,
+        M: MethodMsg<Args = M> + JobMethod + DeserializeOwned + Send + 'static,
         M::Reply: Serialize + FromFailure + Send + 'static,
         W: FnOnce(&Engine, M, Vec<OwnedFd>) -> M::Reply + Send + 'static,
     {
@@ -207,7 +209,9 @@ impl Dispatcher {
                 return;
             }
         };
-        let permit: Option<Permit> = match admission.map(Admission::admit).transpose() {
+        let interactive = call.priority() == Some(JobPriority::Interactive);
+        let admitted = admission.map(|admission| admission.admit(interactive));
+        let permit: Option<Permit> = match admitted.transpose() {
             Ok(permit) => permit,
             Err(retry_after) => {
                 let busy = M::Reply::from_failure(InferFailure::Busy {
@@ -233,6 +237,42 @@ fn reply(peer: PeerId, request_id: u32, answer: &impl Serialize) -> Reply {
         request_id,
         payload: crownos_ipc::postcard::to_stdvec(answer)
             .map_err(|_| RemoteError::handler("reply serialization failed")),
+    }
+}
+
+/// The priority a request carries, if it is a job.
+pub(crate) trait JobMethod {
+    fn priority(&self) -> Option<JobPriority>;
+}
+
+macro_rules! job_methods {
+    ($($method:ident),*) => {
+        $(impl JobMethod for inference::$method {
+            fn priority(&self) -> Option<JobPriority> {
+                Some(self.job.priority)
+            }
+        })*
+    };
+}
+
+job_methods!(
+    ocr,
+    embed_text,
+    rerank,
+    generate,
+    generate_with_image,
+    describe_screen
+);
+
+impl JobMethod for inference::capabilities {
+    fn priority(&self) -> Option<JobPriority> {
+        None
+    }
+}
+
+impl JobMethod for inference::unload {
+    fn priority(&self) -> Option<JobPriority> {
+        None
     }
 }
 

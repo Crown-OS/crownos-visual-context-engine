@@ -107,6 +107,9 @@ impl TextRecognizer {
             .filter(|&classes| classes > 0)
             .ok_or_else(|| InferError::Backend("the recogniser output has no classes".into()))?;
         let per_line = probabilities.len() / batch.len().max(1);
+        if per_line == 0 {
+            return Err(InferError::Backend("the recogniser gave no output".into()));
+        }
         for (&(index, _), line_probabilities) in batch.iter().zip(probabilities.chunks(per_line)) {
             let (text, confidence) = self.labels.decode(line_probabilities, classes);
             let (Some(slot), Some(&bounds)) = (lines.get_mut(index), boxes.get(index)) else {

@@ -2,16 +2,25 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::error::InferError;
 use crate::request::Priority;
 
-/// Work for a model: it gets the loaded model, or the error of its load.
-pub(crate) type ModelJob<C> = Box<dyn FnOnce(Result<&C, &InferError>) + Send>;
+/// The body of a job: it gets the loaded model, or the error of its load.
+pub(crate) type JobBody<C> = Box<dyn FnOnce(Result<&C, &InferError>) + Send>;
+
+/// Work for a model. A job that runs longer than `hang_budget` counts as hung.
+pub(crate) struct ModelJob<C: ?Sized> {
+    pub(crate) hang_budget: Duration,
+    pub(crate) run: JobBody<C>,
+}
 
 struct JobQueues<C: ?Sized> {
     interactive: VecDeque<ModelJob<C>>,
     background: VecDeque<ModelJob<C>>,
+    /// When the running job counts as hung.
+    hang_at: Option<Instant>,
     stopping: bool,
     abandoned: bool,
     ended: bool,
@@ -63,6 +72,7 @@ impl<C: ?Sized + Send + Sync + 'static> ModelWorker<C> {
             queues: Mutex::new(JobQueues {
                 interactive: VecDeque::new(),
                 background: VecDeque::new(),
+                hang_at: None,
                 stopping: false,
                 abandoned: false,
                 ended: false,
@@ -101,6 +111,14 @@ impl<C: ?Sized> Drop for ModelWorker<C> {
 }
 
 impl<C: ?Sized> JobSender<C> {
+    /// Whether the job that runs now has passed its hang budget.
+    pub(crate) fn is_hung(&self, now: Instant) -> bool {
+        self.shared
+            .queues()
+            .hang_at
+            .is_some_and(|hang_at| now >= hang_at)
+    }
+
     pub(crate) fn send(&self, priority: Priority, job: ModelJob<C>) {
         let mut queues = self.shared.queues();
         match priority {
@@ -126,8 +144,10 @@ fn serve<C: ?Sized>(
     loop {
         let job = {
             let mut queues = shared.queues();
+            queues.hang_at = None;
             loop {
                 if let Some(job) = queues.next() {
+                    queues.hang_at = Some(Instant::now() + job.hang_budget);
                     break job;
                 }
                 if queues.stopping {
@@ -139,7 +159,7 @@ fn serve<C: ?Sized>(
                     .unwrap_or_else(PoisonError::into_inner);
             }
         };
-        job(model);
+        (job.run)(model);
     }
 }
 
@@ -160,5 +180,45 @@ impl<C: ?Sized> Drop for WorkerEnd<'_, C> {
         if queues.abandoned {
             self.abandoned_workers.fetch_sub(1, Ordering::SeqCst);
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use std::sync::mpsc;
+
+    use super::*;
+
+    #[test]
+    fn interactive_jobs_jump_the_queue() {
+        let worker = ModelWorker::<str>::spawn(
+            "test model".into(),
+            || {
+                thread::sleep(Duration::from_millis(100));
+                Ok(Arc::from("model"))
+            },
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .unwrap();
+        let (order, finished) = mpsc::channel();
+        for (priority, name) in [
+            (Priority::Background, "background"),
+            (Priority::Interactive, "interactive"),
+        ] {
+            let order = order.clone();
+            worker.sender().send(
+                priority,
+                ModelJob {
+                    hang_budget: Duration::from_secs(5),
+                    run: Box::new(move |_| {
+                        let _ = order.send(name);
+                    }),
+                },
+            );
+        }
+        let first = finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        let second = finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!([first, second], ["interactive", "background"]);
     }
 }

@@ -65,6 +65,8 @@ pub(super) enum Behaviour {
     Hang,
     /// Takes one millisecond per text.
     SlowPerText,
+    /// Takes 300 ms.
+    Slow,
 }
 
 /// One fake per runtime. Calls are logged as `model@Device`.
@@ -158,6 +160,10 @@ impl FakeModel {
             Behaviour::OwnTimeout => Err(InferError::Timeout),
             Behaviour::Hang => {
                 thread::sleep(Duration::from_secs(30));
+                Ok(())
+            }
+            Behaviour::Slow => {
+                thread::sleep(Duration::from_millis(300));
                 Ok(())
             }
             Behaviour::SlowPerText => {

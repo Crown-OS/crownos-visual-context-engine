@@ -117,8 +117,10 @@ fn an_inconclusive_half_open_trial_keeps_the_breaker_open() {
 }
 
 #[test]
-fn a_hung_call_times_out_and_the_next_call_avoids_it() {
-    let harness = Harness::all_devices();
+fn a_call_past_its_hang_limit_is_found_by_the_next_call() {
+    let mut short_limit = settings();
+    short_limit.unmeasured_call_limit = Duration::from_millis(300);
+    let harness = Harness::new(&[Device::Cuda, Device::Vulkan], &[], short_limit);
     harness.llama.set("small", Device::Cuda, Behaviour::Hang);
     let started = Instant::now();
     assert!(matches!(
@@ -126,7 +128,21 @@ fn a_hung_call_times_out_and_the_next_call_avoids_it() {
         Err(InferError::Timeout)
     ));
     assert!(started.elapsed() < QUICK);
+    thread::sleep(Duration::from_millis(400));
     assert_eq!(harness.describe(SECOND).unwrap(), "small@Vulkan");
+    assert_eq!(harness.describe(SECOND).unwrap(), "small@Vulkan");
+}
+
+#[test]
+fn a_call_slower_than_its_deadline_keeps_the_model_and_the_breaker_closed() {
+    let harness = Harness::all_devices();
+    harness.llama.set("small", Device::Cuda, Behaviour::Slow);
+    assert!(matches!(
+        harness.describe(Duration::from_millis(100)),
+        Err(InferError::Timeout)
+    ));
+    assert_eq!(harness.describe(QUICK).unwrap(), "small@Cuda");
+    assert_eq!(harness.llama.load_count(), 1);
 }
 
 #[test]
