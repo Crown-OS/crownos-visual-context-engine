@@ -54,7 +54,9 @@ ONNX Runtime is not linked: `crown-context-inferd` loads `/usr/lib/libonnxruntim
 
 llama-cpp-sys-2 builds llama.cpp as shared libraries and leaves dangling `lib*.so` links in
 the target directory, on which a later run of its build script panics. Run
-`just clean-llama-links` before a build (`just check` does), and do the same in CI before
-`cargo clippy` and `cargo test`. The package installs libllama, libggml and the ggml device
+`just clean-llama-links` before a build (`just check` does). The shared CI workflow has no
+pre-build step, so CI cannot run the cleanup: a clean CI checkout builds llama.cpp once, and
+only a second run of its build script in the same target directory meets the links.
+The package installs libllama, libggml and the ggml device
 modules in `/usr/lib/crown-context`, where `crown-context-inferd` looks for them.
 

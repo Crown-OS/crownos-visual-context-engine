@@ -175,5 +175,5 @@ fn images_never_go_to_another_machine() {
             .unwrap()
             .generate(&request(vec![Media::Image(pixel)]))
     });
-    assert!(matches!(result, Err(InferError::InvalidInput(_))));
+    assert!(matches!(result, Err(InferError::Unavailable(_))));
 }

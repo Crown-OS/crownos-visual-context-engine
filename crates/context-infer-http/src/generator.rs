@@ -127,8 +127,8 @@ impl Generate for RemoteGenerator {
             Output::Text => None,
         };
         if !request.media.is_empty() && !self.model.images_allowed {
-            return Err(InferError::InvalidInput(
-                "images go only to a server on this machine".into(),
+            return Err(InferError::Unavailable(
+                "image input on a server off this machine".into(),
             ));
         }
         let mut images = image_urls(&request.media)?.into_iter();
