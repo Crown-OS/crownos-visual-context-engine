@@ -24,15 +24,18 @@ unsafe impl Send for ReadOnlyMapping {}
 unsafe impl Sync for ReadOnlyMapping {}
 
 impl ReadOnlyMapping {
-    /// Maps `memfd` after a check that it carries [`REQUIRED_SEALS`]. The mapping stays
-    /// valid after the file descriptor closes.
-    pub fn map(memfd: &OwnedFd) -> Result<Self, ShmError> {
+    /// Maps `memfd` after a check that it carries [`REQUIRED_SEALS`] and holds at most
+    /// `limit` bytes. The mapping stays valid after the file descriptor closes.
+    pub fn map(memfd: &OwnedFd, limit: usize) -> Result<Self, ShmError> {
         if !fcntl_get_seals(memfd)?.contains(REQUIRED_SEALS) {
             return Err(ShmError::NotSealed);
         }
         let length = usize::try_from(fstat(memfd)?.st_size).map_err(|_| ShmError::Empty)?;
         if length == 0 {
             return Err(ShmError::Empty);
+        }
+        if length > limit {
+            return Err(ShmError::TooLarge { length, limit });
         }
         // SAFETY: a fresh shared read-only mapping of a file that is sealed against shrinking,
         // so every page in `length` stays backed and readable until `munmap` in `Drop`.
@@ -91,9 +94,17 @@ mod tests {
     #[test]
     fn a_shared_image_maps_with_the_same_bytes() {
         let memfd = share_read_only(c"frame", &[1, 2, 3, 4]).unwrap();
-        let mapping = ReadOnlyMapping::map(&memfd).unwrap();
+        let mapping = ReadOnlyMapping::map(&memfd, 64).unwrap();
         drop(memfd);
         assert_eq!(mapping.as_ref(), [1, 2, 3, 4]);
+        let memfd = share_read_only(c"frame", &[1, 2, 3, 4]).unwrap();
+        assert!(matches!(
+            ReadOnlyMapping::map(&memfd, 3),
+            Err(ShmError::TooLarge {
+                length: 4,
+                limit: 3
+            })
+        ));
     }
 
     #[test]
@@ -115,7 +126,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            ReadOnlyMapping::map(&memfd),
+            ReadOnlyMapping::map(&memfd, 64),
             Err(ShmError::NotSealed)
         ));
     }
@@ -127,12 +138,12 @@ mod tests {
         file.write_all(&[1, 2, 3]).unwrap();
         let memfd = OwnedFd::from(file);
         assert!(matches!(
-            ReadOnlyMapping::map(&memfd),
+            ReadOnlyMapping::map(&memfd, 64),
             Err(ShmError::NotSealed)
         ));
         fcntl_add_seals(&memfd, SealFlags::SHRINK | SealFlags::GROW).unwrap();
         assert!(matches!(
-            ReadOnlyMapping::map(&memfd),
+            ReadOnlyMapping::map(&memfd, 64),
             Err(ShmError::NotSealed)
         ));
     }

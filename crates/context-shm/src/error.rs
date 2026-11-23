@@ -6,6 +6,8 @@ pub enum ShmError {
     NotSealed,
     #[error("the memfd is empty")]
     Empty,
+    #[error("the memfd holds {length} bytes, more than the {limit} expected")]
+    TooLarge { length: usize, limit: usize },
     #[error("memfd call failed: {0}")]
     Io(#[from] io::Error),
 }

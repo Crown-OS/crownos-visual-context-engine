@@ -16,13 +16,18 @@ use context_shm::share_read_only;
 
 const REPLY_TIMEOUT: Option<Duration> = Some(Duration::from_secs(30));
 
-/// Kills the daemon it started, by its own handle, when the test ends.
-struct Daemon(Child);
+/// Kills the daemon it started, by its own handle, and removes its directory when the test
+/// ends.
+struct Daemon {
+    child: Child,
+    directory: PathBuf,
+}
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
 
@@ -39,7 +44,10 @@ fn start(directory: &Path, models: &Path) -> Daemon {
         .env("ORT_DYLIB_PATH", directory.join("no-onnxruntime.so"))
         .spawn()
         .unwrap();
-    let daemon = Daemon(child);
+    let daemon = Daemon {
+        child,
+        directory: directory.to_owned(),
+    };
     let socket = directory.join(format!("{INFERENCE_SERVICE}.sock"));
     let started = Instant::now();
     while !socket.exists() {

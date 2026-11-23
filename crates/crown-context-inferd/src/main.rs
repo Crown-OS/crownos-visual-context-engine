@@ -7,19 +7,26 @@ mod convert;
 mod dispatch;
 mod engine;
 mod logging;
+mod util;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use clap::Parser;
+use context_infer::Policy;
 use crownos_ipc::ServiceBuilder;
 use crownos_ipc::adapter::tokio::serve_with_outbox;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::dispatch::{Dispatcher, RESIDENT, send_reply};
 use crate::engine::Engine;
+use crate::util::memory::memory_tier;
+use crate::util::power::on_battery;
+
+/// How often the daemon reads the power state and checks for hung models.
+const WATCH_INTERVAL: Duration = Duration::from_secs(5);
 
 const DEFAULT_MODELS_DIR: &str = "/usr/share/crownos/context/models";
 
@@ -77,6 +84,7 @@ async fn main() -> Result<()> {
         Duration::from_secs(cli.idle_unload_seconds),
     ));
     let mut terminate = signal(SignalKind::terminate()).context("watching for SIGTERM")?;
+    let watch = watch_power_and_health(Arc::clone(&engine));
     tokio::select! {
         served = serve_with_outbox(
             &mut server,
@@ -86,10 +94,36 @@ async fn main() -> Result<()> {
         ) => served.context("the inference service stopped")?,
         _ = tokio::signal::ctrl_c() => tracing::info!("stopping"),
         _ = terminate.recv() => tracing::info!("stopping"),
+        () = watch => {
+            engine.save_benchmarks();
+            bail!("too many model threads hang; exiting so that systemd restarts the service");
+        }
     }
     idle_unload.abort();
     engine.save_benchmarks();
     Ok(())
+}
+
+/// Keeps the policy in step with the power state, and returns when hung model threads need
+/// a restart of the process.
+async fn watch_power_and_health(engine: Arc<Engine>) {
+    let tier = memory_tier();
+    let mut ticks = tokio::time::interval(WATCH_INTERVAL);
+    loop {
+        ticks.tick().await;
+        let policy = Policy {
+            on_battery: on_battery(),
+            remote_consent: false,
+            tier,
+        };
+        if engine.router.policy() != policy {
+            tracing::info!(?policy, "the inference policy changed");
+            engine.router.set_policy(policy);
+        }
+        if engine.router.needs_restart() {
+            return;
+        }
+    }
 }
 
 /// Every quarter of `idle_for`, unloads what has not run for `idle_for` and saves the

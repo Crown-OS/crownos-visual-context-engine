@@ -118,6 +118,7 @@ mod tests {
         let library = directory.join("libonnxruntime.so");
         assert!(device_is_usable(Device::Cuda, &library, None));
         assert!(!device_is_usable(Device::Cuda, &library, Some(&installed)));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

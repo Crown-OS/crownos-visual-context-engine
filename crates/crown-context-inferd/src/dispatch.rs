@@ -209,7 +209,8 @@ impl Dispatcher {
                 return;
             }
         };
-        let interactive = call.priority() == Some(JobPriority::Interactive);
+        let ticket = call.ticket();
+        let interactive = ticket.is_some_and(|ticket| ticket.priority == JobPriority::Interactive);
         let admitted = admission.map(|admission| admission.admit(interactive));
         let permit: Option<Permit> = match admitted.transpose() {
             Ok(permit) => permit,
@@ -223,9 +224,15 @@ impl Dispatcher {
         };
         let engine = Arc::clone(&self.engine);
         let replies = self.replies.clone();
+        if let Some(ticket) = ticket {
+            tracing::debug!(job_id = ticket.job_id, priority = ?ticket.priority, "job admitted");
+        }
         tokio::task::spawn_blocking(move || {
             let answer = work(&engine, call, fds);
             drop(permit);
+            if let Some(ticket) = ticket {
+                tracing::debug!(job_id = ticket.job_id, "job done");
+            }
             let _ = replies.send(reply(peer, request_id, &answer));
         });
     }
@@ -240,16 +247,16 @@ fn reply(peer: PeerId, request_id: u32, answer: &impl Serialize) -> Reply {
     }
 }
 
-/// The priority a request carries, if it is a job.
+/// The ticket a request carries, if it is a job.
 pub(crate) trait JobMethod {
-    fn priority(&self) -> Option<JobPriority>;
+    fn ticket(&self) -> Option<JobTicket>;
 }
 
 macro_rules! job_methods {
     ($($method:ident),*) => {
         $(impl JobMethod for inference::$method {
-            fn priority(&self) -> Option<JobPriority> {
-                Some(self.job.priority)
+            fn ticket(&self) -> Option<JobTicket> {
+                Some(self.job)
             }
         })*
     };
@@ -265,13 +272,13 @@ job_methods!(
 );
 
 impl JobMethod for inference::capabilities {
-    fn priority(&self) -> Option<JobPriority> {
+    fn ticket(&self) -> Option<JobTicket> {
         None
     }
 }
 
 impl JobMethod for inference::unload {
-    fn priority(&self) -> Option<JobPriority> {
+    fn ticket(&self) -> Option<JobTicket> {
         None
     }
 }

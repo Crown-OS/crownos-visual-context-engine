@@ -121,6 +121,13 @@ fn the_user_file_replaces_models_and_task_lists_by_name() {
     let missing_user_file = system.with_extension("absent");
     let registry = Registry::load(&system, Some(&missing_user_file)).unwrap();
     assert_eq!(registry.candidates(Task::RecognizeText)[0].model, "ocr");
+    remove_scratch_files(&[system, user]);
+}
+
+fn remove_scratch_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[test]
@@ -144,5 +151,7 @@ fn a_broken_user_file_falls_back_to_the_system_registry() {
             "ocr",
             "{name}"
         );
+        remove_scratch_files(&[user]);
     }
+    remove_scratch_files(&[system]);
 }

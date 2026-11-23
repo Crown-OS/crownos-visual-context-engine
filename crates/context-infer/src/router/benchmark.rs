@@ -148,6 +148,7 @@ mod tests {
         let upgraded = BenchmarkCache::load(&path, "ort=1.24");
         assert_eq!(upgraded.latency(Task::RecognizeText, &candidate(), 1), None);
         assert_eq!(upgraded.fingerprint, "ort=1.24");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
