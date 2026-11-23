@@ -12,9 +12,10 @@ pkgdesc="The CrownOS visual context engine: crown-contextd, the crown-context CL
 arch=(x86_64)
 url="https://github.com/Crown-OS/crownos-visual-context-engine"
 license=('MIT OR Apache-2.0')
-depends=(glibc gcc-libs openssl systemd vulkan-icd-loader)
+depends=(glibc gcc-libs openssl systemd vulkan-icd-loader at-spi2-core)
 makedepends=(cargo clang cmake vulkan-headers shaderc spirv-headers)
-optdepends=('onnxruntime-crownos: OCR and text embeddings')
+optdepends=('onnxruntime-cpu: OCR and text embeddings on the CPU (ONNX Runtime 1.18 or newer)'
+            'onnxruntime-cuda: OCR and text embeddings on NVIDIA GPUs (ONNX Runtime 1.18 or newer)')
 options=(!lto !debug)
 
 _workspace="$startdir/.."

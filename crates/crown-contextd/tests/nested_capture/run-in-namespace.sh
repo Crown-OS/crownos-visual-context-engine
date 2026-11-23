@@ -1,9 +1,11 @@
 #!/bin/sh
-# Runs the nested capture tests as root of a user, mount and pid namespace. An overlay on
+# Runs nested session tests as root of a user, mount and pid namespace. An overlay on
 # /usr/bin, on a tmpfs at /mnt, puts this build of crown-contextd at /usr/bin/crown-contextd.
+# A second overlay lets a test install a desktop entry in /usr/share/applications.
 #
 # In the namespace the user's own files and the overlay look owned by root, and the real
-# root's files look owned by nobody. So the nested compositor gives the daemon the Engine grant
+# root's files look owned by nobody. The tests run without capabilities, as a session does, so a
+# process that turned off PR_SET_DUMPABLE is closed to them. So the nested compositor gives the daemon the Engine grant
 # it migrates from agents.ron. Nothing changes outside the namespace, and every process of the
 # test ends with it.
 #
@@ -33,5 +35,7 @@ mkdir /mnt/upper /mnt/work
 cp "$2" /mnt/upper/crown-contextd
 chmod 0755 /mnt/upper /mnt/upper/crown-contextd
 mount -t overlay overlay -o "lowerdir=/usr/bin,upperdir=/mnt/upper,workdir=/mnt/work" /usr/bin
-exec "$1" --ignored --nocapture --test-threads=1 $3
+mkdir /mnt/applications /mnt/applications-work
+mount -t overlay overlay -o "lowerdir=/usr/share/applications,upperdir=/mnt/applications,workdir=/mnt/applications-work" /usr/share/applications
+exec setpriv --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- "$1" --ignored --nocapture --test-threads=1 $3
 ' run-in-namespace "$test_binary" "$contextd" "$filter"

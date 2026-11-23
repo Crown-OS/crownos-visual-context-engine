@@ -26,6 +26,10 @@ jobs:
         with:
           toolchain: 1.97.1
 
+      # makepkg runs with --nodeps, so the makedepends of the PKGBUILD come from here.
+      - name: Install the build tools
+        run: pacman -Syu --noconfirm --needed base-devel clang cmake vulkan-headers shaderc spirv-headers
+
       - name: Package
         run: |
           if [[ $GITHUB_REF_TYPE == tag ]]; then
