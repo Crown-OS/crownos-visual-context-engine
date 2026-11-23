@@ -27,6 +27,20 @@ pub enum AccessibleText {
 struct Readings {
     by_window: HashMap<WindowIdent, (Timestamp, AccessibleText)>,
     requested: Option<WindowIdent>,
+    reader_connected: bool,
+}
+
+impl Readings {
+    fn keep(&mut self, window: &WindowIdent, text: AccessibleText, read_at: Timestamp) {
+        if self.by_window.len() >= KEPT_WINDOWS {
+            self.by_window
+                .retain(|_, (kept_at, _)| read_at.0 - kept_at.0 < KEPT_FOR.0);
+        }
+        self.by_window.insert(window.clone(), (read_at, text));
+        if self.requested.as_ref() == Some(window) {
+            self.requested = None;
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -47,19 +61,22 @@ pub struct RecentReadings {
 impl RecentReadings {
     /// Keeps what a read that started at `read_at` found.
     pub(crate) fn record(&self, window: &WindowIdent, text: AccessibleText, read_at: Timestamp) {
-        let Ok(mut readings) = self.shared.readings.lock() else {
-            return;
-        };
-        if readings.by_window.len() >= KEPT_WINDOWS {
-            readings
-                .by_window
-                .retain(|_, (kept_at, _)| read_at.0 - kept_at.0 < KEPT_FOR.0);
-        }
-        readings.by_window.insert(window.clone(), (read_at, text));
-        if readings.requested.as_ref() == Some(window) {
-            readings.requested = None;
+        if let Ok(mut readings) = self.shared.readings.lock() {
+            readings.keep(window, text, read_at);
         }
         self.shared.recorded.notify_all();
+    }
+
+    /// Marks the collector connected to the a11y bus until the returned value is dropped.
+    pub(crate) fn connect_reader(&self) -> ConnectedReader {
+        self.set_reader_connected(true);
+        ConnectedReader(self.clone())
+    }
+
+    fn set_reader_connected(&self, connected: bool) {
+        if let Ok(mut readings) = self.shared.readings.lock() {
+            readings.reader_connected = connected;
+        }
     }
 
     /// The window the capture path wants read, once it asks.
@@ -73,12 +90,21 @@ impl RecentReadings {
         fresh(&*self.shared.readings.lock().ok()?, window, since)
     }
 
-    /// Asks the collector to read `window` now.
+    /// Asks the collector to read `window` now. With no collector on the a11y bus, the window
+    /// is `Unread` at once, so OCR covers it.
     pub fn request(&self, window: &WindowIdent) {
-        if let Ok(mut readings) = self.shared.readings.lock() {
+        let Ok(mut readings) = self.shared.readings.lock() else {
+            return;
+        };
+        if readings.reader_connected {
             readings.requested = Some(window.clone());
+            drop(readings);
+            self.shared.requested.notify_one();
+        } else {
+            readings.keep(window, AccessibleText::Unread, Timestamp::now());
+            drop(readings);
+            self.shared.recorded.notify_all();
         }
-        self.shared.requested.notify_one();
     }
 
     /// Waits up to `wait` for a reading of `window` taken at `since` or later. Stops early when
@@ -107,6 +133,15 @@ impl RecentReadings {
                 .ok()?
                 .0;
         }
+    }
+}
+
+/// The collector is on the a11y bus while this lives.
+pub(crate) struct ConnectedReader(RecentReadings);
+
+impl Drop for ConnectedReader {
+    fn drop(&mut self) {
+        self.0.set_reader_connected(false);
     }
 }
 
@@ -141,6 +176,27 @@ mod tests {
         assert_eq!(readings.latest(&window("b"), before), None);
         let later = Timestamp(Timestamp::now().0 + 1);
         assert_eq!(readings.latest(&window("a"), later), None);
+    }
+
+    #[test]
+    fn a_request_without_a_connected_reader_is_unread_at_once() {
+        let readings = RecentReadings::default();
+        let since = Timestamp::now();
+        readings.request(&window("a"));
+        assert_eq!(
+            readings.latest(&window("a"), since),
+            Some(AccessibleText::Unread)
+        );
+        let reader = readings.connect_reader();
+        let later = Timestamp(Timestamp::now().0 + 1);
+        readings.request(&window("a"));
+        assert_eq!(readings.latest(&window("a"), later), None);
+        drop(reader);
+        readings.request(&window("b"));
+        assert_eq!(
+            readings.latest(&window("b"), since),
+            Some(AccessibleText::Unread)
+        );
     }
 
     #[test]

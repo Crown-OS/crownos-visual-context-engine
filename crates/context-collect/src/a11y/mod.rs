@@ -193,6 +193,7 @@ async fn run_once<H: AccessibilityHost>(
     };
     let bus = AccessibilityBusConnection::new(connection.connection().clone());
     let events = bus.subscribe().await?;
+    let _connected = readings.connect_reader();
     tracing::info!("reading text through the accessibility bus");
     let (forward, received) = mpsc::channel(QUEUED_EVENTS);
     let forwarder = tokio::spawn(events.for_each(move |event| {
