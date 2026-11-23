@@ -96,12 +96,16 @@ const TZ_OFFSET: Micros = Micros::ZERO;
 /// peers whose grant is gone.
 pub(crate) fn send_event(server: &mut Server, grants: &Grants, outgoing: Outgoing) {
     let sent = match outgoing {
-        Outgoing::Context(context) => send_context(server, grants, &context),
+        Outgoing::Context(context) => {
+            grants.keep_keys_of(&server.peer_ids());
+            send_context(server, grants, &context)
+        }
         Outgoing::Segment(segment) => server.emit_where(&SegmentClosed { segment }, |caller| {
             grants.of(caller).scopes.contains(Scope::Text)
         }),
         Outgoing::Answered { .. } => Ok(()),
         Outgoing::GrantsChanged => {
+            grants.keep_keys_of(&server.peer_ids());
             let dropped = server.drop_peers_where(|caller| grants.of(caller).scopes.is_empty());
             if !dropped.is_empty() {
                 tracing::info!(peers = dropped.len(), "dropped callers whose grant is gone");
@@ -163,7 +167,12 @@ impl PeerHandler for Api {
         caller: Caller<'_>,
         query: SearchQuery,
     ) -> Result<SearchResults, RemoteError> {
-        let scopes = self.authorize(caller, "search", Some(Scope::Text))?;
+        let raw_wanted = query.redaction == context_protocol::Redaction::Raw;
+        let needed = if raw_wanted { Scope::Raw } else { Scope::Text };
+        let scopes = self.authorize(caller, "search", Some(needed))?;
+        if raw_wanted {
+            scopes.require(Scope::Text)?;
+        }
         let started = Instant::now();
         let limit = query.limit.clamp(1, MAX_RESULTS);
         let range = query

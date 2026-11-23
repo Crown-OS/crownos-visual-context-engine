@@ -24,7 +24,7 @@ use crownos_config::schema::{ContextAccess, ContextDecision};
 use crownos_ipc::adapter::tokio::serve_with_outbox;
 use crownos_ipc::{Caller, Error as IpcError, ServiceBuilder};
 
-use crate::access::{Grants, Parked, answer_parked, ask_in_background, caller_key};
+use crate::access::{Grants, Parked, answer_parked, park_or_refuse};
 use crate::shared::Shared;
 use crate::util::paths::state_dir;
 
@@ -132,11 +132,9 @@ async fn main() -> Result<()> {
             |server, peer, message| {
                 let key = server
                     .credentials(peer)
-                    .and_then(|credentials| caller_key(Caller { peer, credentials }));
+                    .and_then(|credentials| grants.key_of(Caller { peer, credentials }));
                 if let Some(key) = key.filter(|key| grants.decide(Some(key)) == ContextDecision::Ask) {
-                    if parked.borrow_mut().park(key.clone(), peer, message) {
-                        ask_in_background(key, &questions);
-                    }
+                    park_or_refuse(server, &mut parked.borrow_mut(), key, peer, message, &questions);
                     return Ok(true);
                 }
                 context_protocol::context::dispatch_with_peer(&mut *handler.borrow_mut(), server, peer, message).map(|()| true)

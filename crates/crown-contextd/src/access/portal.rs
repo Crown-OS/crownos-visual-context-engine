@@ -44,14 +44,18 @@ pub(crate) async fn ask_api_access(key: &AppKey) -> Result<PortalAnswer, String>
         .map_err(|error| error.to_string())?;
     let title = format!("Let {} use your screen context?", display_name(key));
     let subtitle = format!("{key} asks what you work on.");
-    let body = "It can see the window list, and titles if you allow them. \
+    let body = "With the window list it sees which apps you use. With titles it can \
+                also search what you worked on, and see your timeline and episodes. \
                 You can take this back any time in Settings.";
     let choices: Vec<Choice<'_>> = vec![
         (REMEMBER, "Remember this choice", Vec::new(), "false"),
         (
             SCOPE,
             "The app may see",
-            vec![(METADATA, "Window list"), (TEXT, "Window list and titles")],
+            vec![
+                (METADATA, "Window list"),
+                (TEXT, "Window list, titles and search"),
+            ],
             METADATA,
         ),
     ];

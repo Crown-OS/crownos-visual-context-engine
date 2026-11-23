@@ -8,12 +8,12 @@ mod redaction;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use crownos_config::schema::{AppKey, ContextAccess, ContextDecision, Expiry, Scope, ScopeSet};
-use crownos_ipc::{Caller, RemoteError};
+use crownos_ipc::{Caller, PeerId, RemoteError};
 
-pub(crate) use first_use::{answer_parked, ask_in_background};
+pub(crate) use first_use::{answer_parked, park_or_refuse};
 pub(crate) use parked::Parked;
 pub(crate) use portal::PortalAnswer;
 pub(crate) use redaction::redact_context;
@@ -23,10 +23,19 @@ pub(crate) use redaction::redact_context;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Grants {
     access: Arc<RwLock<ContextAccess>>,
-    /// Answers the user gave without remembering them; they last while
-    /// contextd runs.
+    /// Answers the user gave without remembering them; they last until the
+    /// grants change or contextd stops.
     answered: Arc<RwLock<HashMap<AppKey, ScopeSet>>>,
+    /// Apps the user refused without remembering, and when they may ask again.
+    cooldown: Arc<RwLock<HashMap<AppKey, Instant>>>,
+    /// The key of each peer, worked out once from the program it ran when it
+    /// connected.
+    keys: Arc<RwLock<HashMap<PeerId, Option<AppKey>>>>,
 }
+
+/// After the user refuses without remembering, the app is not asked again
+/// for this long, so it cannot ask over and over by calling again.
+const ASK_AGAIN_AFTER: Duration = Duration::from_secs(10 * 60);
 
 /// A caller and what it may do.
 #[derive(Debug, Clone)]
@@ -80,12 +89,19 @@ impl Grants {
         Self {
             access: Arc::new(RwLock::new(access)),
             answered: Arc::default(),
+            cooldown: Arc::default(),
+            keys: Arc::default(),
         }
     }
 
+    /// Takes the new file. Answers given without remembering end with it,
+    /// so a caller that only had one is dropped as well.
     pub(crate) fn replace(&self, access: ContextAccess) {
         if let Ok(mut grants) = self.access.write() {
             *grants = access;
+        }
+        if let Ok(mut answered) = self.answered.write() {
+            answered.clear();
         }
     }
 
@@ -103,11 +119,24 @@ impl Grants {
         if decision != ContextDecision::Ask {
             return decision;
         }
-        self.answered
+        if let Some(scopes) = self
+            .answered
             .read()
             .ok()
             .and_then(|answered| answered.get(key).copied())
-            .map_or(ContextDecision::Ask, ContextDecision::Granted)
+        {
+            return ContextDecision::Granted(scopes);
+        }
+        let cooling_down = self.cooldown.read().is_ok_and(|cooldown| {
+            cooldown
+                .get(key)
+                .is_some_and(|until| *until > Instant::now())
+        });
+        if cooling_down {
+            ContextDecision::Denied
+        } else {
+            ContextDecision::Ask
+        }
     }
 
     /// Applies the user's answer: a remembered one is written to
@@ -115,8 +144,18 @@ impl Grants {
     /// replaced; any other one lasts while contextd runs.
     pub(crate) fn answer(&self, key: &AppKey, scopes: Option<ScopeSet>, remember: bool) {
         if !remember {
-            if let (Some(scopes), Ok(mut answered)) = (scopes, self.answered.write()) {
-                answered.insert(key.clone(), scopes);
+            match scopes {
+                Some(scopes) => {
+                    if let Ok(mut answered) = self.answered.write() {
+                        answered.insert(key.clone(), scopes);
+                    }
+                }
+                None => {
+                    if let Ok(mut cooldown) = self.cooldown.write() {
+                        cooldown.retain(|_, until| *until > Instant::now());
+                        cooldown.insert(key.clone(), Instant::now() + ASK_AGAIN_AFTER);
+                    }
+                }
             }
             return;
         }
@@ -149,12 +188,36 @@ impl Grants {
     /// The scopes of a caller, named by the program it ran when it
     /// connected. A caller whose program could not be read then has none.
     pub(crate) fn of(&self, caller: Caller<'_>) -> CallerScopes {
-        self.of_key(caller_key(caller))
+        self.of_key(self.key_of(caller))
+    }
+
+    /// The key of a caller, worked out on its first request and kept.
+    pub(crate) fn key_of(&self, caller: Caller<'_>) -> Option<AppKey> {
+        if let Some(key) = self
+            .keys
+            .read()
+            .ok()
+            .and_then(|keys| keys.get(&caller.peer).cloned())
+        {
+            return key;
+        }
+        let key = caller_key(caller);
+        if let Ok(mut keys) = self.keys.write() {
+            keys.insert(caller.peer, key.clone());
+        }
+        key
+    }
+
+    /// Forgets the keys of peers that are gone.
+    pub(crate) fn keep_keys_of(&self, peers: &[PeerId]) {
+        if let Ok(mut keys) = self.keys.write() {
+            keys.retain(|peer, _| peers.contains(peer));
+        }
     }
 }
 
 /// The key of a caller, from the program crownos-ipc read at accept.
-pub(crate) fn caller_key(caller: Caller<'_>) -> Option<AppKey> {
+fn caller_key(caller: Caller<'_>) -> Option<AppKey> {
     let program = caller.credentials.program.as_ref()?;
     AppKey::of_program(
         &program.executable,
@@ -227,5 +290,26 @@ mod tests {
             ContextDecision::Granted(metadata)
         );
         assert_eq!(grants.decide(None), ContextDecision::Denied);
+    }
+
+    #[test]
+    fn a_new_file_ends_answers_that_were_not_remembered() {
+        let agent = AppKey::Spawned {
+            component: "agent".to_owned(),
+        };
+        let grants = Grants::from_access(ContextAccess::default());
+        grants.answer(&agent, Some(ScopeSet::EMPTY.with(Scope::Metadata)), false);
+        grants.replace(ContextAccess::default());
+        assert_eq!(grants.decide(Some(&agent)), ContextDecision::Ask);
+    }
+
+    #[test]
+    fn a_refusal_that_is_not_remembered_stops_new_questions_for_a_while() {
+        let agent = AppKey::Spawned {
+            component: "agent".to_owned(),
+        };
+        let grants = Grants::from_access(ContextAccess::default());
+        grants.answer(&agent, None, false);
+        assert_eq!(grants.decide(Some(&agent)), ContextDecision::Denied);
     }
 }

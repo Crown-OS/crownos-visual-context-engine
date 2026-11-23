@@ -8,6 +8,7 @@ use crownos_config::schema::{AppKey, Scope, ScopeSet};
 use crownos_ipc::{Kind, RemoteError, Server};
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::parked::Parking;
 use super::portal::ask_api_access;
 use super::{Grants, Parked, PortalAnswer};
 use crate::api::Api;
@@ -31,6 +32,31 @@ pub(crate) fn ask_in_background(key: AppKey, events: &UnboundedSender<Outgoing>)
         };
         let _ = events.send(Outgoing::Answered { key, answer });
     });
+}
+
+/// Keeps a request of an app the user is not asked about yet, and asks; or
+/// refuses it when too many requests wait already.
+pub(crate) fn park_or_refuse(
+    server: &mut Server,
+    parked: &mut Parked,
+    key: AppKey,
+    peer: crownos_ipc::PeerId,
+    message: crownos_ipc::Message,
+    events: &UnboundedSender<Outgoing>,
+) {
+    match parked.park(key.clone(), peer, message) {
+        Parking::First => ask_in_background(key, events),
+        Parking::Added => {}
+        Parking::Full(peer, message) => {
+            if message.kind == Kind::Request {
+                let _ = server.reply_err(
+                    peer,
+                    message.req_id,
+                    &RemoteError::new(RemoteError::LIMIT, "too many requests wait for the user"),
+                );
+            }
+        }
+    }
 }
 
 /// Stores the answer and runs, or refuses, the requests that waited for it.
