@@ -17,6 +17,7 @@ use super::toolkit::Toolkit;
 const HUNG_AFTER: Duration = Duration::from_millis(150);
 const CACHE_PATH: &str = "/org/a11y/atspi/cache";
 const REGISTRY: &str = "org.a11y.atspi.Registry";
+const NULL_PATH: &str = "/org/a11y/atspi/null";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReadError {
@@ -146,11 +147,17 @@ impl Reader<'_> {
         self.invoke(object, AtspiCall::State, &()).await
     }
 
+    /// The children that exist: Chromium lists a null object where it has not built a subtree
+    /// yet.
     pub(crate) async fn children(
         &self,
         object: &ObjectRefOwned,
     ) -> Result<Vec<ObjectRefOwned>, ReadError> {
-        self.invoke(object, AtspiCall::Children, &()).await
+        let children: Vec<ObjectRefOwned> = self.invoke(object, AtspiCall::Children, &()).await?;
+        Ok(children
+            .into_iter()
+            .filter(|child| !child.is_null() && child.path_as_str() != NULL_PATH)
+            .collect())
     }
 
     pub(crate) async fn whole_text(&self, object: &ObjectRefOwned) -> Result<String, ReadError> {

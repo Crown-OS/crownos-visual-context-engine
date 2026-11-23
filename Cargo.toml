@@ -12,6 +12,7 @@ members = [
     "crates/crown-contextd",
     "crates/crown-context",
     "eval",
+    "eval/a11y-cost",
 ]
 
 [workspace.package]

@@ -67,6 +67,12 @@ pub(crate) async fn read_frame(
     frame: &ObjectRefOwned,
 ) -> Result<FrameContent, ReadError> {
     let structure = fetch_structure(reader, root, frame).await?;
+    tracing::debug!(
+        nodes = structure.nodes.len(),
+        complete = structure.complete,
+        strategy = ?structure.strategy,
+        "structure fetched"
+    );
     if let Some(verdict) = assess(&structure) {
         return Ok(verdict);
     }
