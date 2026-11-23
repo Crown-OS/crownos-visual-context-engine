@@ -23,6 +23,7 @@ pub type OutcomeSink = Box<dyn FnMut(CaptureOutcome) + Send>;
 #[derive(Debug)]
 pub(crate) struct AnalysisWorker {
     stop: Arc<AtomicBool>,
+    inbox: Arc<FrameInbox>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -38,6 +39,7 @@ pub(crate) struct WorkerParts {
 impl AnalysisWorker {
     pub(crate) fn spawn(parts: WorkerParts) -> std::io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
+        let inbox = Arc::clone(&parts.inbox);
         let thread = std::thread::Builder::new()
             .name("context-analysis".to_owned())
             .spawn({
@@ -46,6 +48,7 @@ impl AnalysisWorker {
             })?;
         Ok(Self {
             stop,
+            inbox,
             thread: Some(thread),
         })
     }
@@ -57,7 +60,8 @@ impl Drop for AnalysisWorker {
         if let Some(thread) = self.thread.take()
             && !context_core::join_within(thread, STOP_WAIT)
         {
-            tracing::warn!(waited = ?STOP_WAIT, "the analysis thread did not stop; leaving it");
+            self.inbox.drain(Duration::ZERO);
+            tracing::error!(waited = ?STOP_WAIT, "the analysis thread did not stop; its queued frames are zeroed, the frame it holds is not");
         }
     }
 }

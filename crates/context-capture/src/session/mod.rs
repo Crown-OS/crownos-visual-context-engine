@@ -58,6 +58,7 @@ pub(crate) struct CaptureSession {
     commands: Sender<Command>,
     waker: Arc<OwnedFd>,
     stop: Arc<AtomicBool>,
+    inbox: Arc<FrameInbox>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -82,6 +83,7 @@ impl CaptureSession {
             .spawn({
                 let waker = Arc::clone(&waker);
                 let stop = Arc::clone(&stop);
+                let inbox = Arc::clone(&inbox);
                 move || {
                     let session = SessionThread {
                         link,
@@ -98,6 +100,7 @@ impl CaptureSession {
         Ok(Self {
             commands,
             waker,
+            inbox,
             stop,
             thread: Some(thread),
         })
@@ -137,7 +140,8 @@ impl Drop for CaptureSession {
         if let Some(thread) = self.thread.take()
             && !context_core::join_within(thread, STOP_WAIT)
         {
-            tracing::warn!(waited = ?STOP_WAIT, "the capture session thread did not stop; leaving it");
+            self.inbox.drain(Duration::ZERO);
+            tracing::error!(waited = ?STOP_WAIT, "the capture session thread did not stop; the queued frames are zeroed, a frame it holds is not");
         }
     }
 }
