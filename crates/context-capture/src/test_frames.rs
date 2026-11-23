@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
-use context_core::{Trigger, WindowIdent};
+use context_core::{Timestamp, Trigger, WindowIdent};
 
 use crate::frame::{CaptureTarget, CapturedFrame};
 use crate::geometry::Rect;
@@ -13,6 +13,7 @@ pub(crate) fn target(window: &str) -> CaptureTarget {
     CaptureTarget {
         window: WindowIdent(window.to_owned()),
         trigger: Trigger::FocusChange,
+        requested_at: Timestamp::now(),
         app_key: "test.app".to_owned(),
         app_name: "Test".to_owned(),
         title: "Test window".to_owned(),

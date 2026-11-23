@@ -28,7 +28,9 @@ use context_collect::a11y::{
     AccessibilityBus, AccessibilityCollector, AccessibilityHost, AccessibleText, AtspiCall,
     FetchStrategy, FrameContent, RecentReadings, Toolkit, WindowReading, read_active_window,
 };
-use context_core::{Observation, ObservationKind, TextSource, WindowIdent, WindowRecord};
+use context_core::{
+    Observation, ObservationKind, TextSource, Timestamp, WindowIdent, WindowRecord,
+};
 use tokio::sync::watch;
 
 use support::{
@@ -244,7 +246,7 @@ async fn the_collector_reads_on_focus_and_again_after_typing() {
     let (observations, window, lines) = next_text(observations).await;
     assert_eq!(window, ident);
     assert_probe_text(&lines);
-    let kept = readings.fresh(&ident, Duration::from_secs(5), Duration::ZERO);
+    let kept = readings.latest(&ident, Timestamp(0));
     assert!(
         matches!(&kept, Some(AccessibleText::Lines(kept)) if *kept == lines),
         "{kept:?}"

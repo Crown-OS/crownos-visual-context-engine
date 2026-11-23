@@ -98,6 +98,7 @@ fn captured_frame(ident: &WindowIdent, pixels: &[u8], width: u32, height: u32) -
     let target = CaptureTarget {
         window: ident.clone(),
         trigger: Trigger::FocusChange,
+        requested_at: Timestamp::now(),
         app_key: "org.crownos.test".to_owned(),
         app_name: "Test".to_owned(),
         title: "Noise".to_owned(),

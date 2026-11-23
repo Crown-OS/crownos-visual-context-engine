@@ -149,7 +149,7 @@ impl FrameAnalyzer {
 
     /// Analyses `frame`. Everything that needs its pixels runs first: tiles, bands, the line
     /// cache, and sealed copies of the regions the models read. Then the frame is zeroed and
-    /// closed, before any model runs.
+    /// closed, before any model runs and before any wait for structured text.
     pub fn analyse(
         &mut self,
         frame: CapturedFrame,
@@ -163,10 +163,12 @@ impl FrameAnalyzer {
         };
         let target = frame.target.clone();
         let window = &target.window;
-        let structured = match self.structured_text.window_text(window) {
+        let first_reading = self.structured_text.window_text(&target);
+        let awaiting = first_reading == StructuredReading::Pending;
+        let structured = match first_reading {
             StructuredReading::Text(lines) => Some(lines),
             StructuredReading::Sensitive => return self.withhold(frame),
-            StructuredReading::Unavailable => None,
+            StructuredReading::Pending | StructuredReading::Unavailable => None,
         };
         let first_capture = !self.tile_hashes.contains(window);
         let mut changed = self
@@ -200,6 +202,22 @@ impl FrameAnalyzer {
             .flatten();
         let (captured_at, width, height) = (frame.captured_at, frame.width, frame.height);
         drop(frame);
+        let structured = if awaiting {
+            match self
+                .structured_text
+                .wait_for_text(&target, conditions.cancel)
+            {
+                StructuredReading::Text(lines) => Some(lines),
+                StructuredReading::Sensitive => {
+                    drop((ocr_copy, screen_copy));
+                    self.forget_window(window);
+                    return withheld(target.clone(), captured_at, width, height);
+                }
+                StructuredReading::Pending | StructuredReading::Unavailable => None,
+            }
+        } else {
+            structured
+        };
 
         let text = match structured {
             Some(structured) => Some(structured),
@@ -268,23 +286,33 @@ impl FrameAnalyzer {
         );
         drop(frame);
         self.forget_window(&target.window);
-        CaptureOutcome {
-            target,
-            captured_at,
-            width,
-            height,
-            damage_permille: 0,
-            text: None,
-            description: None,
-            secret_found: false,
-            withheld: true,
-            cancelled: false,
-        }
+        withheld(target, captured_at, width, height)
     }
 
     pub fn forget_window(&mut self, window: &WindowIdent) {
         self.tile_hashes.pop(window);
         self.line_caches.forget_window(window);
+    }
+}
+
+/// The outcome of a capture whose window showed a password field: nothing to report.
+const fn withheld(
+    target: CaptureTarget,
+    captured_at: Timestamp,
+    width: u32,
+    height: u32,
+) -> CaptureOutcome {
+    CaptureOutcome {
+        target,
+        captured_at,
+        width,
+        height,
+        damage_permille: 0,
+        text: None,
+        description: None,
+        secret_found: false,
+        withheld: true,
+        cancelled: false,
     }
 }
 

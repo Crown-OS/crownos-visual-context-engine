@@ -10,6 +10,8 @@ use crate::util::frame_memory::FrameMemory;
 pub struct CaptureTarget {
     pub window: WindowIdent,
     pub trigger: Trigger,
+    /// When the engine asked for the capture. Structured text must be read after this.
+    pub requested_at: Timestamp,
     /// Volatile-region masks are learned per app.
     pub app_key: String,
     pub app_name: String,

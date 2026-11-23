@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use context_core::Trigger;
 
 use super::*;
-use crate::cancellation::ModelCall;
+use crate::cancellation::{Cancellation, ModelCall};
 use crate::region_copy::RegionCopy;
 use crate::screen_models::{ModelError, RecognizedLine};
 use crate::structured_text::NoStructuredText;
@@ -288,12 +288,50 @@ fn region_copies_are_closed_after_analysis_and_after_an_error() {
     assert!(seen.iter().all(|inode| !open.contains(inode)));
 }
 
-struct FixedReading(StructuredReading);
+/// Answers `first` at once and `waited` after the frame is zeroed. The wait sees the frame's
+/// memfd, so it can check it is zero, and it blocks until cancelled when `waited` is `Pending`.
+struct ScriptedReading {
+    first: StructuredReading,
+    waited: StructuredReading,
+    frame_memfd: Option<std::os::fd::OwnedFd>,
+    zero_while_waiting: Arc<AtomicBool>,
+}
 
-impl StructuredText for FixedReading {
-    fn window_text(&mut self, _: &WindowIdent) -> StructuredReading {
-        self.0.clone()
+impl ScriptedReading {
+    fn new(first: StructuredReading, waited: StructuredReading) -> Self {
+        Self {
+            first,
+            waited,
+            frame_memfd: None,
+            zero_while_waiting: Arc::new(AtomicBool::new(false)),
+        }
     }
+}
+
+impl StructuredText for ScriptedReading {
+    fn window_text(&mut self, _: &CaptureTarget) -> StructuredReading {
+        self.first.clone()
+    }
+
+    fn wait_for_text(&mut self, _: &CaptureTarget, cancel: &dyn Cancellation) -> StructuredReading {
+        if let Some(memfd) = &self.frame_memfd {
+            self.zero_while_waiting
+                .store(is_all_zero(memfd), Ordering::Relaxed);
+        }
+        if self.waited == StructuredReading::Pending {
+            while !cancel.is_cancelled() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        self.waited.clone()
+    }
+}
+
+fn scripted_analyzer(models: &Arc<FakeModels>, reading: ScriptedReading) -> FrameAnalyzer {
+    FrameAnalyzer::new(
+        Arc::clone(models) as Arc<dyn ScreenModels>,
+        Box::new(reading),
+    )
 }
 
 #[test]
@@ -303,12 +341,13 @@ fn structured_text_replaces_ocr_and_is_not_reported_twice() {
         source: TextSource::Accessibility,
         lines: vec!["fn main() {".to_owned()],
     };
-    let mut analyzer = FrameAnalyzer::new(
-        Arc::clone(&models) as Arc<dyn ScreenModels>,
-        Box::new(FixedReading(StructuredReading::Text(accessible.clone()))),
+    let reading = ScriptedReading::new(
+        StructuredReading::Text(accessible.clone()),
+        StructuredReading::Unavailable,
     );
     let cancel = AtomicBool::new(false);
-    let outcome = analyzer.analyse(line_at(10, vec![]), on_battery(&cancel));
+    let outcome =
+        scripted_analyzer(&models, reading).analyse(line_at(10, vec![]), on_battery(&cancel));
     assert_eq!(models.ocr_calls(), 0);
     assert_eq!(outcome.text, Some(accessible));
     let observations = outcome.observations();
@@ -321,15 +360,69 @@ fn structured_text_replaces_ocr_and_is_not_reported_twice() {
 #[test]
 fn a_window_with_a_password_field_is_dropped_unread() {
     let models = FakeModels::reading("hunter2");
-    let mut analyzer = FrameAnalyzer::new(
-        Arc::clone(&models) as Arc<dyn ScreenModels>,
-        Box::new(FixedReading(StructuredReading::Sensitive)),
-    );
+    let reading = ScriptedReading::new(StructuredReading::Sensitive, StructuredReading::Sensitive);
+    let frame = line_at(10, vec![]);
+    let memfd = memfd_reader(&frame);
     let cancel = AtomicBool::new(false);
-    let outcome = analyzer.analyse(line_at(10, vec![]), plugged_in(&cancel));
+    let outcome = scripted_analyzer(&models, reading).analyse(frame, plugged_in(&cancel));
+    assert!(is_all_zero(&memfd));
     assert!(outcome.withheld);
     assert!(outcome.text.is_none() && outcome.description.is_none());
     assert_eq!(models.ocr_calls() + models.describe_calls(), 0);
     assert!(models.copies_seen.lock().unwrap().is_empty());
     assert!(outcome.observations().is_empty());
+}
+
+#[test]
+fn the_wait_for_a_reading_starts_after_the_frame_is_zero() {
+    let models = FakeModels::reading("fn main() {");
+    let accessible = StructuredLines {
+        source: TextSource::Accessibility,
+        lines: vec!["notes".to_owned()],
+    };
+    let frame = line_at(10, vec![]);
+    let mut reading = ScriptedReading::new(
+        StructuredReading::Pending,
+        StructuredReading::Text(accessible.clone()),
+    );
+    reading.frame_memfd = Some(memfd_reader(&frame));
+    let zero = Arc::clone(&reading.zero_while_waiting);
+    let cancel = AtomicBool::new(false);
+    let outcome = scripted_analyzer(&models, reading).analyse(frame, on_battery(&cancel));
+    assert!(zero.load(Ordering::Relaxed));
+    assert_eq!(outcome.text, Some(accessible));
+    assert_eq!(models.ocr_calls(), 0);
+}
+
+#[test]
+fn a_password_field_seen_during_the_wait_withholds_the_capture() {
+    let models = FakeModels::reading("hunter2");
+    let reading = ScriptedReading::new(StructuredReading::Pending, StructuredReading::Sensitive);
+    let cancel = AtomicBool::new(false);
+    let outcome =
+        scripted_analyzer(&models, reading).analyse(line_at(10, vec![]), plugged_in(&cancel));
+    assert!(outcome.withheld);
+    assert_eq!(models.ocr_calls() + models.describe_calls(), 0);
+    let open = open_inodes();
+    let seen = models.copies_seen.lock().unwrap().clone();
+    assert!(seen.iter().all(|inode| !open.contains(inode)));
+    assert!(outcome.observations().is_empty());
+}
+
+#[test]
+fn a_pause_during_the_wait_returns_with_the_frame_zero() {
+    let models = FakeModels::reading("fn main() {");
+    let frame = line_at(10, vec![]);
+    let memfd = memfd_reader(&frame);
+    let reading = ScriptedReading::new(StructuredReading::Pending, StructuredReading::Pending);
+    let cancel = AtomicBool::new(false);
+    let outcome = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            cancel.store(true, Ordering::Relaxed);
+        });
+        scripted_analyzer(&models, reading).analyse(frame, plugged_in(&cancel))
+    });
+    assert!(is_all_zero(&memfd));
+    assert!(outcome.cancelled);
 }

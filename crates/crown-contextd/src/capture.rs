@@ -12,7 +12,7 @@ use context_capture::{
 };
 use context_collect::a11y::RecentReadings;
 use context_collect::{CompositorLink, SensitiveReason};
-use context_core::{Observation, Trigger, WindowIdent};
+use context_core::{Observation, Timestamp, Trigger, WindowIdent};
 use context_infer_client::InferdClient;
 use context_policy::Policy;
 
@@ -102,6 +102,7 @@ pub(crate) fn target(
     Some(CaptureTarget {
         window: focus.clone(),
         trigger,
+        requested_at: Timestamp::now(),
         app_key: app.app_key,
         app_name: app.name,
         title: record.title.clone(),

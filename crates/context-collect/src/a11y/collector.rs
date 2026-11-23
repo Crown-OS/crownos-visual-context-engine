@@ -97,6 +97,11 @@ impl<'h, H: AccessibilityHost> Collector<'h, H> {
                     self.on_compositor_focus(focused).await;
                 }
                 () = sleep_until_due(due) => self.read_due().await,
+                requested = self.readings.requested() => {
+                    if let Some(window) = requested {
+                        self.on_capture_request(window).await;
+                    }
+                }
             }
         }
     }
@@ -163,11 +168,49 @@ impl<'h, H: AccessibilityHost> Collector<'h, H> {
             .applications
             .find_for(&self.bus, &self.health, &mut self.resolver, &record)
             .await;
-        if let Some(application) = application {
-            self.activated_frames.remove(&application);
-            self.schedule
-                .wake(&application, Wake::FocusChange, Instant::now());
-            self.focused_application = Some(application);
+        match application {
+            Some(application) => {
+                self.activated_frames.remove(&application);
+                self.schedule
+                    .wake(&application, Wake::FocusChange, Instant::now());
+                self.focused_application = Some(application);
+            }
+            None => {
+                self.focused_application = None;
+                self.readings
+                    .record(&record.ident, AccessibleText::Unread, Timestamp::now());
+            }
+        }
+    }
+
+    /// The capture path wants a reading of `window` newer than its request: the focused
+    /// application is read at once. A window without an a11y application is `Unread` at once,
+    /// so the capture does not wait for it.
+    async fn on_capture_request(&mut self, window: WindowIdent) {
+        let focused = self.host.with_windows(|windows| {
+            windows
+                .focus()
+                .filter(|focused| focused.ident == window)
+                .cloned()
+        });
+        let application = match (&self.focused_application, focused) {
+            (Some(application), Some(_)) => Some(application.clone()),
+            (None, Some(record)) => {
+                self.applications
+                    .find_for(&self.bus, &self.health, &mut self.resolver, &record)
+                    .await
+            }
+            (_, None) => None,
+        };
+        match application {
+            Some(application) => {
+                self.schedule
+                    .wake(&application, Wake::CaptureRequest, Instant::now());
+                self.focused_application = Some(application);
+            }
+            None => self
+                .readings
+                .record(&window, AccessibleText::Unread, Timestamp::now()),
         }
     }
 
@@ -226,6 +269,7 @@ impl<'h, H: AccessibilityHost> Collector<'h, H> {
 
     /// Whether the read was complete.
     async fn read(&mut self, application: &str) -> Result<bool, ReadError> {
+        let started = Timestamp::now();
         let info = self
             .applications
             .describe(&self.bus, &self.health, application)
@@ -248,25 +292,28 @@ impl<'h, H: AccessibilityHost> Collector<'h, H> {
             return Ok(true);
         };
         if !self.host.may_read(&record, &title) {
-            self.readings.forget(&record.ident);
+            self.readings
+                .record(&record.ident, AccessibleText::Unread, started);
             return Ok(true);
         }
         let content = match read_frame(&reader, &root, &frame).await {
             Ok(content) => content,
             Err(error) => {
-                self.readings.forget(&record.ident);
+                self.readings
+                    .record(&record.ident, AccessibleText::Unread, started);
                 return Err(error);
             }
         };
         match content {
             FrameContent::Sensitive => {
                 self.readings
-                    .record(&record.ident, AccessibleText::Sensitive);
+                    .record(&record.ident, AccessibleText::Sensitive, started);
                 self.host.flag_sensitive(&record.ident);
                 Ok(true)
             }
             FrameContent::Incomplete => {
-                self.readings.record(&record.ident, AccessibleText::Unread);
+                self.readings
+                    .record(&record.ident, AccessibleText::Unread, started);
                 Ok(false)
             }
             FrameContent::Text {
@@ -276,7 +323,8 @@ impl<'h, H: AccessibilityHost> Collector<'h, H> {
                 ..
             } => {
                 if !may_send(self.host, &record.ident, &title) {
-                    self.readings.forget(&record.ident);
+                    self.readings
+                        .record(&record.ident, AccessibleText::Unread, started);
                     return Ok(complete);
                 }
                 let text = if complete && !lines.is_empty() {
@@ -284,7 +332,7 @@ impl<'h, H: AccessibilityHost> Collector<'h, H> {
                 } else {
                     AccessibleText::Unread
                 };
-                self.readings.record(&record.ident, text);
+                self.readings.record(&record.ident, text, started);
                 if !lines.is_empty() && self.dedup.is_new(&record.ident, &lines, Instant::now()) {
                     self.emit(record.ident, url, lines);
                 }

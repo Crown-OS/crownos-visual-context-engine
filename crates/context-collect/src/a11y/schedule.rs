@@ -13,6 +13,8 @@ pub(crate) enum Wake {
     TitleChange,
     DocumentLoaded,
     Typing,
+    /// The capture path needs a reading newer than its request.
+    CaptureRequest,
 }
 
 impl Wake {
@@ -21,6 +23,7 @@ impl Wake {
             Self::FocusChange => Trigger::FocusChange,
             Self::TitleChange | Self::DocumentLoaded => Trigger::TitleChange,
             Self::Typing => Trigger::TypingPause,
+            Self::CaptureRequest => return Duration::ZERO,
         };
         Duration::from_micros(u64::try_from(trigger.settle().0).unwrap_or(0))
     }
