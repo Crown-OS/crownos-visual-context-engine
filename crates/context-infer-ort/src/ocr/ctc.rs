@@ -13,6 +13,10 @@ impl Labels {
         Self { labels }
     }
 
+    pub(super) const fn len(&self) -> usize {
+        self.labels.len()
+    }
+
     /// Greedy CTC decoding of `steps` rows of `classes` probabilities: the best label per
     /// step, repeats merged, blanks dropped. The confidence is the mean probability of the
     /// kept labels.

@@ -1,10 +1,11 @@
 //! PP-OCR on ONNX Runtime: a DB text detector on fixed-size tiles at native resolution, then
-//! a CTC recogniser on text lines batched by width bucket. The tile size, the line height and
-//! the three widths keep the shapes few; the batch size of the recogniser still varies.
+//! a CTC recogniser on text lines in width buckets, each with a fixed batch size, so every
+//! shape is static. A line wider than the widest bucket is read in overlapping pieces.
 
 mod components;
 mod ctc;
 mod detect;
+mod lines;
 mod recognize;
 mod tensor;
 

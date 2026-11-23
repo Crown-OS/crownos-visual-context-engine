@@ -11,6 +11,7 @@ use crate::session::GraphSession;
 use crate::util::error::backend_error;
 
 const MAX_TOKENS: usize = 512;
+const SUB_BATCH: usize = 16;
 const POOLED_OUTPUT: &str = "sentence_embedding";
 
 /// A text encoder graph with its tokenizer. Pools token states as the registry says, cuts
@@ -139,14 +140,29 @@ impl Embed for OnnxEmbedder {
         &self.space
     }
 
+    /// Runs the texts in sub-batches, so padding to the longest text stays small and memory
+    /// stays bounded.
     fn embed(&self, texts: &[String], purpose: EmbedPurpose) -> Result<Embeddings, InferError> {
         let dimensions = self.space.dimensions as usize;
-        if texts.is_empty() {
-            return Ok(Embeddings {
-                dimensions,
-                values: Vec::new(),
-            });
+        let mut embeddings = Embeddings {
+            dimensions,
+            values: Vec::with_capacity(texts.len() * dimensions),
+        };
+        for sub_batch in texts.chunks(SUB_BATCH) {
+            self.embed_sub_batch(sub_batch, purpose, &mut embeddings)?;
         }
+        Ok(embeddings)
+    }
+}
+
+impl OnnxEmbedder {
+    fn embed_sub_batch(
+        &self,
+        texts: &[String],
+        purpose: EmbedPurpose,
+        embeddings: &mut Embeddings,
+    ) -> Result<(), InferError> {
+        let dimensions = embeddings.dimensions;
         let batch = self.token_batch(texts, purpose)?;
         let mut inputs = Vec::new();
         for name in self.graph.input_names() {
@@ -183,10 +199,6 @@ impl Embed for OnnxEmbedder {
                     "the encoder gives {shape:?}, not {dimensions} wide"
                 ))
             })?;
-        let mut embeddings = Embeddings {
-            dimensions,
-            values: Vec::with_capacity(batch.rows * dimensions),
-        };
         for row in 0..batch.rows {
             let vector = if pooled_output {
                 states
@@ -206,7 +218,7 @@ impl Embed for OnnxEmbedder {
             };
             embeddings.push_normalized(&vector);
         }
-        Ok(embeddings)
+        Ok(())
     }
 }
 
