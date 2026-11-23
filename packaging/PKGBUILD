@@ -8,12 +8,13 @@
 pkgname=crownos-visual-context-engine
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="The CrownOS visual context engine: crown-contextd and the crown-context CLI"
+pkgdesc="The CrownOS visual context engine: crown-contextd, the crown-context CLI and the crown-context-inferd model worker"
 arch=(x86_64)
 url="https://github.com/Crown-OS/crownos-visual-context-engine"
 license=('MIT OR Apache-2.0')
-depends=(glibc gcc-libs openssl systemd)
-makedepends=(cargo clang)
+depends=(glibc gcc-libs openssl systemd vulkan-icd-loader)
+makedepends=(cargo clang cmake vulkan-headers shaderc spirv-headers)
+optdepends=('onnxruntime-crownos: OCR and text embeddings')
 options=(!lto !debug)
 
 _workspace="$startdir/.."
@@ -27,6 +28,8 @@ build() {
   cd "$_workspace"
   export CARGO_TARGET_DIR="$srcdir/target"
   cargo build --release --frozen -p crown-contextd -p crown-context
+  find "$CARGO_TARGET_DIR" -maxdepth 3 -xtype l -name 'lib*.so' -delete
+  cargo build --release --frozen -p crown-context-inferd --features vulkan
 }
 
 package() {
@@ -36,5 +39,19 @@ package() {
   install -Dm644 packaging/systemd/crown-contextd.service -t "$pkgdir/usr/lib/systemd/user"
   install -d "$pkgdir/usr/lib/systemd/user/default.target.wants"
   ln -s ../crown-contextd.service "$pkgdir/usr/lib/systemd/user/default.target.wants/crown-contextd.service"
+
+  install -Dm755 "$srcdir"/target/release/crown-context-inferd -t "$pkgdir/usr/bin"
+  install -Dm644 packaging/systemd/crown-context-inferd.{service,socket} -t "$pkgdir/usr/lib/systemd/user"
+  install -d "$pkgdir/usr/lib/systemd/user/sockets.target.wants"
+  ln -s ../crown-context-inferd.socket "$pkgdir/usr/lib/systemd/user/sockets.target.wants/crown-context-inferd.socket"
+  install -Dm644 models/registry.ron "$pkgdir/usr/share/crownos/context/registry.ron"
+  install -d "$pkgdir/usr/share/crownos/context/models"
+  # libllama, libggml and the ggml device modules, where the inferd rpath points.
+  local llama_out
+  llama_out="$(dirname "$(find "$srcdir/target/release/build" -path '*/out/lib/libllama.so' -print -quit)")/.."
+  install -d "$pkgdir/usr/lib/crown-context/ggml"
+  cp -P "$llama_out"/lib/lib{llama,llama-common,ggml,ggml-base,mtmd}.so* "$pkgdir/usr/lib/crown-context/"
+  install -Dm755 "$llama_out"/backends/libggml-*.so -t "$pkgdir/usr/lib/crown-context/ggml"
+
   install -Dm644 LICENSE-{MIT,APACHE} -t "$pkgdir/usr/share/licenses/$pkgname"
 }

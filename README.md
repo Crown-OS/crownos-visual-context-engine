@@ -17,7 +17,12 @@ privacy, performance, API and the phased plan. This README is the map of the cod
 | `crates/context-store` | 5 | SQLCipher store: events, segments, episodes, FTS5, forget with cascade |
 | `crates/context-engine` | 4 | Heartbeat merge, segmenter, correlator, classifier, working memory |
 | `crates/context-capture` | 2 | Capture scheduling and frame processing (not started) |
-| `crates/context-infer` | 3 | Inference backends and the model registry (not started) |
+| `crates/context-infer` | 3 | Task API, capability traits, `models/registry.ron` and the router |
+| `crates/context-infer-ort` | 3 | ONNX Runtime backend: PP-OCR and text embeddings |
+| `crates/context-infer-llama` | 3 | llama.cpp backend: generation with images and JSON schemas, GGUF embeddings |
+| `crates/context-infer-http` | 3 | OpenAI-compatible client for servers on this machine, the LAN or a cloud |
+| `crates/context-shm` | 3 | Sealed read-only memfds for images |
+| `crates/crown-context-inferd` | 3 | The model worker (`crownos-visual-context-infer`) |
 | `crates/crown-contextd` | 1–5 | The daemon |
 | `crates/crown-context` | 1–5 | The CLI: `status`, `tail`, `timeline`, `search`, `forget`, `pause` |
 | `eval` | 0 | Synthetic traces of a working day, from a seed |
@@ -38,3 +43,18 @@ has to add its own path there. Observation is off until `enabled: true` is set i
 `~/.config/crownos/visual_context.ron`; a replay ignores that switch.
 
 Sibling CrownOS repositories are path dependencies one directory up.
+
+## Building
+
+The llama.cpp backend compiles llama.cpp, so a build needs `cmake`, `clang` and a C++
+compiler. The `vulkan` feature of `context-infer-llama` and `crown-context-inferd` also needs
+`vulkan-headers`, `shaderc` (`glslc`) and `spirv-headers`; `cuda` needs the CUDA toolkit.
+ONNX Runtime is not linked: `crown-context-inferd` loads `/usr/lib/libonnxruntime.so` (or
+`$ORT_DYLIB_PATH`) at run time.
+
+llama-cpp-sys-2 builds llama.cpp as shared libraries and leaves dangling `lib*.so` links in
+the target directory, on which a later run of its build script panics. Run
+`just clean-llama-links` before a build (`just check` does), and do the same in CI before
+`cargo clippy` and `cargo test`. The package installs libllama, libggml and the ggml device
+modules in `/usr/lib/crown-context`, where `crown-context-inferd` looks for them.
+
