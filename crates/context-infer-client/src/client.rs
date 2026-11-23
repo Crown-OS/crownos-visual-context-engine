@@ -15,6 +15,12 @@ use crate::frame::SealedFrame;
 /// Time past the job budget that the client waits for inferd's own `Timeout`.
 const REPLY_SLACK: Duration = Duration::from_secs(5);
 const SUMMARY_TOKENS_PER_SEGMENT: u32 = 400;
+/// inferd answers at most 2048 tokens per request.
+const SEGMENTS_PER_REQUEST: usize = 5;
+/// inferd answers at most 768 KiB of vectors per request.
+const MAX_VECTOR_BYTES: usize = 768 * 1024;
+/// Small enough for vectors up to 4096 wide; later requests use the width of the first answer.
+const FIRST_EMBED_BATCH: usize = 48;
 
 /// Talks to crown-context-inferd. Each call opens its own connection, so calls from many
 /// threads never wait for each other here; inferd orders them.
@@ -94,15 +100,13 @@ impl InferdClient {
     }
 }
 
-impl ContextTasks for InferdClient {
-    fn summarize_segments(
+impl InferdClient {
+    /// One `summarize_segments` request; inferd answers at most 2048 tokens.
+    fn summarize_request(
         &self,
         segments: &[SegmentDigest],
         job: Job,
     ) -> Result<Vec<SegmentSummary>, InferError> {
-        if segments.is_empty() {
-            return Ok(Vec::new());
-        }
         let schema = Output::json_for::<SegmentSummaries>().schema_text();
         let max_tokens = SUMMARY_TOKENS_PER_SEGMENT
             .saturating_mul(u32::try_from(segments.len()).unwrap_or(u32::MAX));
@@ -126,6 +130,20 @@ impl ContextTasks for InferdClient {
             )));
         }
         Ok(summaries.segments)
+    }
+}
+
+impl ContextTasks for InferdClient {
+    fn summarize_segments(
+        &self,
+        segments: &[SegmentDigest],
+        job: Job,
+    ) -> Result<Vec<SegmentSummary>, InferError> {
+        let mut summaries = Vec::with_capacity(segments.len());
+        for request in segments.chunks(SEGMENTS_PER_REQUEST) {
+            summaries.extend(self.summarize_request(request, job)?);
+        }
+        Ok(summaries)
     }
 
     /// Copies `screen` once into a sealed memfd; use [`InferdClient::describe_frame`] to
@@ -152,10 +170,36 @@ impl ContextTasks for InferdClient {
         purpose: EmbedPurpose,
         job: Job,
     ) -> Result<EmbeddedTexts, InferError> {
-        let batch = self.call(job, |client, ticket| {
-            client.embed_text(ticket, texts, convert::purpose(purpose))
-        })?;
-        convert::embedded(batch)
+        let mut embedded: Option<EmbeddedTexts> = None;
+        let mut remaining = texts.as_slice();
+        let mut batch_size = FIRST_EMBED_BATCH;
+        loop {
+            let (request, rest) = remaining.split_at(batch_size.min(remaining.len()));
+            let answer = self.call(job, |client, ticket| {
+                client.embed_text(ticket, request.to_vec(), convert::purpose(purpose))
+            })?;
+            let answer = convert::embedded(answer)?;
+            let row_bytes = answer.embeddings.dimensions.max(1) * size_of::<f32>();
+            batch_size = (MAX_VECTOR_BYTES / row_bytes).max(1);
+            embedded = Some(match embedded {
+                None => answer,
+                Some(mut so_far) if so_far.space == answer.space => {
+                    so_far.embeddings.values.extend(answer.embeddings.values);
+                    so_far
+                }
+                Some(so_far) => {
+                    return Err(InferError::Backend(format!(
+                        "the embedding space changed from {} to {} within one call",
+                        so_far.space, answer.space
+                    )));
+                }
+            });
+            remaining = rest;
+            if remaining.is_empty() {
+                break;
+            }
+        }
+        embedded.ok_or_else(|| InferError::Backend("no embedding answer".into()))
     }
 
     fn embed_space(&self) -> Option<EmbedSpace> {

@@ -85,10 +85,16 @@ impl Handler for FakeInferd {
         _: u32,
     ) -> Answer<String> {
         assert_eq!(template, "summarize_segments");
-        assert!(vars[0].1.contains("App: Zed"));
+        assert!(vars[0].1.contains("## Segment"));
+        assert!(!vars[0].1.contains("## Segment 6"));
         assert!(schema.unwrap().contains("open_items"));
         assert!(job.budget_ms > 0);
-        Ok(Ok(r#"{"segments": [{"summary": "s", "activity_label": "coding", "entities": [], "facts": [], "open_items": []}]}"#.into()))
+        let segment = r#"{"summary": "s", "activity_label": "coding", "entities": [], "facts": [], "open_items": []}"#;
+        let count = vars[0].1.matches("## Segment").count();
+        Ok(Ok(format!(
+            r#"{{"segments": [{}]}}"#,
+            vec![segment; count].join(",")
+        )))
     }
 
     fn generate_with_image(
@@ -182,6 +188,16 @@ fn every_task_reaches_inferd_with_sealed_frames() {
         .unwrap();
     assert_eq!(embedded.space.to_string(), "vectors/OnnxRuntime/int8/2");
     assert_eq!(client.embed_space(), Some(embedded.space));
+    let many: Vec<String> = (0..120).map(|index| index.to_string()).collect();
+    let embedded = client
+        .embed_text(many, EmbedPurpose::Document, job())
+        .unwrap();
+    assert_eq!(embedded.embeddings.len(), 120);
+    let segments = vec![SegmentDigest::default(); 7];
+    assert_eq!(
+        client.summarize_segments(&segments, job()).unwrap().len(),
+        7
+    );
     assert!(matches!(
         client.embed_text(Vec::new(), EmbedPurpose::Document, job()),
         Err(InferError::Busy { retry_after }) if retry_after == Duration::from_millis(300)
