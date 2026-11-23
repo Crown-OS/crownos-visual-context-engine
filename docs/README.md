@@ -26,6 +26,8 @@ Every factual claim carries a confidence tag:
 | **[V]** | Verified from source code, official docs, or a manifest. This includes the CrownOS repos, which were read directly. |
 | **[R]** | Reported by a credible secondary source and not re-verified. |
 | **[A]** | Architectural assumption or design decision. It must be validated by a benchmark or spike, listed in [08 §Phase 0](08-implementation-plan.md#phase-0--foundations-and-de-risking-spikes). |
+| **[V vendor]** | Read in a primary source, but the number comes from the vendor's own benchmark. |
+| **[A, derived]** | Our own calculation from published numbers. Not measured. |
 
 ---
 

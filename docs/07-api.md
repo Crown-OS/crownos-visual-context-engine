@@ -8,7 +8,7 @@ Tags: **[V]** verified · **[A]** design decision.
 |---|---|---|
 | `crownos_context_v1` (version 2), `crownos_capture_privacy_v1` | Wayland (custom XML in crownos-protocols) | crownpositor ↔ any granted client, many at once, each with its own scope; any app → compositor (privacy) |
 | `ext-image-copy-capture-v1`, `ext-foreign-toplevel-list-v1` | Wayland (standard, already implemented [V]) | crownpositor ↔ contextd |
-| **Context API** `crownos-visual-context` | **crownos-ipc**: Unix socket `$XDG_RUNTIME_DIR/crownos/crownos-visual-context.sock`, 20-byte header, postcard payloads, ≤ 16 fds via SCM_RIGHTS, Request/Reply/Notify/Subscribe/Event kinds, signature-hashed selectors [V]. Peer identity: `SO_PEERPIDFD` → `AppKey`, opt-in `SO_PASSPIDFD` per frame, scope check per request ([05 §11.3](05-privacy-security.md#113-caller-identity-and-scopes)) | contextd ↔ any granted app: shell, agents, CLI, Inspector, crownbar |
+| **Context API** `crownos-visual-context` | **crownos-ipc**: Unix socket `$XDG_RUNTIME_DIR/crownos/crownos-visual-context.sock`, 20-byte header, postcard payloads, ≤ 16 fds via SCM_RIGHTS, Request/Reply/Notify/Subscribe/Event kinds, signature-hashed selectors [V]. Peer identity: `SO_PEERPIDFD` → `AppKey`, opt-in `SO_PASSPIDFD` per message, scope check per request ([05 §11.3](05-privacy-security.md#113-caller-identity-and-scopes)) | contextd ↔ any granted app: shell, agents, CLI, Inspector, crownbar |
 | Inference API `crownos-visual-context-infer` | crownos-ipc; bulk payloads (frames, text batches) in **sealed memfds** | contextd ↔ inferd (only `spawned:crown-contextd` allowed) |
 | Relay API `crownos-visual-context-relay` | crownos-ipc; text only | contextd ↔ relayd, which hosts the OpenAI-compatible HTTP backend (sidecars, LAN, cloud) |
 | Agent bridge | MCP over Unix socket (rmcp, as `crownui/mcp` [V]) | agents ↔ crown-context-mcp ↔ Context API |
@@ -72,7 +72,7 @@ The wire format stays v1. Only the authorizer changes: each request is checked a
 | `remember(MemoryAssertion)` | req | `memory_write` | → `MemoryRef` (user/agent-asserted fact/preference/note; source=user\|agent) |
 | `correct(MemoryRef, Correction)` | req | `memory_write` | → new `MemoryRef` (old invalidated, never overwritten) |
 | `forget(ForgetRequest)` | req | `memory_delete` | → `{ deleted_counts, cascaded_counts }` |
-| `pause(duration?)` / `resume()` | notify | `policy_admin` or `engine` (global pause) | — |
+| `pause(duration?)` / `resume()` | notify | `pause` | — |
 | `set_policy(PolicyPatch)` | req | `policy_admin` | → `Policy` (also persisted to `visual_context.ron`) |
 | `export(ExportRequest)` | req | `raw` | fd → memfd/file with JSONL (open format; text and metadata only, no images) |
 | `subscribe(Topics)` | subscribe | per topic: `metadata` for state topics, `text` for topics that carry titles or text | events below |
@@ -174,14 +174,14 @@ Slow subscribers drop events, never stall the service (crownos-ipc semantics [V]
 | Method | Payload | Result |
 |---|---|---|
 | `capabilities()` | — | tiers, runtimes and devices per task, loaded models |
-| `read_text(OcrJob)` | memfd: grayscale/RGB crops + boxes, lang hints | lines `{text, bbox, conf}` per crop |
-| `describe_screen(CaptionJob)` | memfd: the capture frame + metadata | `{content_kind, caption, visible_entities[]}` or `SchemaFailure` |
-| `embed_text(batch)` | ≤ 32 texts | int8[256] vectors + space id |
+| `recognize_text(OcrJob)` | memfd: grayscale/RGB crops + boxes, lang hints | lines `{text, bbox, conf}` per crop |
+| `describe_screen(CaptionJob)` | memfd: the capture frame + app name + window title | `ScreenDescription {content_kind, caption, visible_entities[]}` or `SchemaFailure` |
+| `embed_text(batch)` | ≤ 32 texts + purpose (query or document) | int8[256] vectors + space id |
 | `rerank(query, docs)` | ≤ 30 docs | scores |
-| `generate(GenerateJob)` | prompt template id + variables + JSON schema (text only) | schema-valid JSON or `SchemaFailure` |
+| `summarize_segments(batch)` | ≤ 8 segment digests (text only) | one `SegmentSummary` per segment, or `SchemaFailure` |
 | `unload(task?)` | — | — |
 
-The methods are tasks of the task layer ([04 §10.4](04-inference.md#104-model-layer-in-context-infer)); none of them names a model. Every job carries `{job_id, priority: interactive|normal|batch, deadline}`; inferd may reject with `Busy{retry_after}`. Frame jobs are never retried after the frame's 60 s TTL; the frame is then dropped and counted as `frame_dropped_unanalysed`.
+The methods are tasks of the task layer ([04 §10.4](04-inference.md#104-model-layer-in-context-infer)); none of them names a model. `generate` is a capability under the tasks, not a method here. relayd serves the same text-only tasks (`embed_text`, `rerank`, `summarize_segments`) through the HTTP backend; it never serves `recognize_text` or `describe_screen`. Every job carries `{job_id, priority: interactive|normal|batch, deadline}`; inferd may reject with `Busy{retry_after}`. Frame jobs are never retried after the frame's 60 s TTL; the frame is then dropped and counted as `frame_dropped_unanalysed`.
 
 ## 13.6 Changes to existing CrownOS interfaces
 
@@ -189,7 +189,7 @@ The methods are tasks of the task layer ([04 §10.4](04-inference.md#104-model-l
 |---|---|
 | crownos-protocols | `crownos-context-v1.xml` version 2 (many binders, per-client scope, `revoked`); `crownos_capture_privacy_v1.xml` |
 | crownpositor | `compositor/src/context/` module; emit plugin-host window events; sensitivity veto in capture handlers; input buckets; pause hotkey; `AppKey` at accept and bind; `ContextState.bound: Vec<Bound>` with per-client event filtering; revoke live clients on config reload; first-use prompt through `PendingPrompts` + portal; consent dialogs ignore synthetic input; blank sensitive windows in output screencopy and screencast; set `org.a11y.Status.IsEnabled` at session start |
-| crownos-ipc | `SO_PEERPIDFD` instead of `pidfd_open`; opt-in `SO_PASSPIDFD` sender check per frame; pass the peer identity into generated handlers |
+| crownos-ipc | `SO_PEERPIDFD` instead of `pidfd_open`; opt-in `SO_PASSPIDFD` sender check per message; pass the peer identity into generated handlers |
 | xdg-desktop-portal-crownos | `AccessDialog` returns the choices (remember, scope); ship it in the ISO |
 | crownotify | `event NotificationPosted { id, app_name, desktop_entry, summary, body, category, urgency, t }` (appended field set) |
 | crownos-config | `visual_context` and new `context_access` sections; add `agents`, `visual_context`, `context_access` to the by-name API; split `Device` from `Runtime` in `AiConfig` and add `Vulkan`, `TensorRt`, `Rocm`, `Remote` |

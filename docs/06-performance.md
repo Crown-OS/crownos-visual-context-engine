@@ -76,7 +76,7 @@ Each resource tier gets its own token bucket: captures, OCR, embedding, LLM, VLM
 | `bench-embed`: retrieval recall@10 on a synthetic "day in the life" corpus, plus throughput per EP | harness | recall@10 ≥ 0.85 |
 | `bench-llm`: JSON validity rate, extraction F1 against a gold set, tokens/s per backend | harness | ≥ 99% valid JSON; entity F1 ≥ 0.7 |
 | `bench-vlm`: caption latency and VRAM per runtime and device (RTX 4050 CUDA, 780M Vulkan, CPU) on low-text frames | harness | latency within the [04 §10.6](04-inference.md#106-generative-call-design-keeps-llm-usage-rare) budgets |
-| `bench-a11y`: 10-minute scripted workload in gnome-text-editor, Kate, Chromium, VS Code and Firefox, in four states (off / enabled with no listener / listeners / reads) | PSS + cgroup `cpu.stat` | ≤ 5% CPU and ≤ 10% RSS above "off" |
+| `bench-a11y`: 10-minute scripted workload in gnome-text-editor, Kate, Chromium, VS Code and Firefox, in four states (off / enabled with no listener / listeners / reads) | PSS + cgroup `cpu.stat` | ≤ 5% CPU and ≤ 10% PSS above "off" |
 | `bench-compositor`: frame-time jitter with the context module on vs off, input event latency | presentation-time traces | no regression beyond the targets |
 | `soak-8h`: scripted workload (browser, editor, terminal, chat, video), replayed from traces plus real apps | headless compositor plus nested session | every target in §12.1 |
 | `bench-search`: 1-year synthetic store (110k segments, 5M text lines) | criterion | p95 targets |

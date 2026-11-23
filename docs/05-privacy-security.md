@@ -37,7 +37,7 @@ Out of scope: root/kernel compromise, compositor compromise (same trust as the d
 | **User-configurable retention** | Retention classes R1 raw (text lines 30 d, input buckets 7 d), R2 episodic (1 y), R3 knowledge (until invalidated/decayed); per-app overrides; storage quota. Pixels have no retention class: they are never stored | C13 + C11 |
 | **Inspection & deletion** | API + CLI + Inspector: browse timeline, see each memory's evidence ("why"), delete item / time range / app / entity / everything; "forget the last 15 minutes" one-click; deletion cascades ([03 §8.1](03-memory.md)) | C14, C9 |
 | **Encryption at rest** | SQLCipher (AES-256) for `context.db` and `audit.db`; random 256-bit DEK wrapped by KEK from `systemd-creds --user` (TPM2-bound where available) or the user's login keyring; key held only in contextd, `mlock`ed, zeroized on exit | C13 |
-| **Secure IPC** | crownos-ipc Unix socket in `$XDG_RUNTIME_DIR/crownos/` (0700); peer identity from `SO_PEERPIDFD` → `AppKey`; opt-in `SO_PASSPIDFD` sender check per frame; scopes per caller; frame memfds sealed with `F_SEAL_FUTURE_WRITE\|F_SEAL_SHRINK\|F_SEAL_GROW` before passing to inferd | C14 |
+| **Secure IPC** | crownos-ipc Unix socket in `$XDG_RUNTIME_DIR/crownos/` (0700); peer identity from `SO_PEERPIDFD` → `AppKey`; opt-in `SO_PASSPIDFD` sender check per message; scopes per caller; frame memfds sealed with `F_SEAL_FUTURE_WRITE\|F_SEAL_SHRINK\|F_SEAL_GROW` before passing to inferd | C14 |
 | **Explicit cloud consent** | Per category and endpoint; text only; first-use payload preview; monthly budget; kill switch | C16 |
 | **Sensitive clipboard / input exclusion** | Secret hint (`x-kde-passwordManagerHint`) honoured [V]; clipboard content stored only for allowed source apps and text MIME ≤ 16 KB after secret detection; a clipboard secret flags the source window; input = aggregated counts only, zeroed in password fields; no keylogging | C0, C4, C5 |
 | **Audit logs** | `audit.db` hash-chained: every API query (actor `AppKey`, scope, result count), every grant, denial and revocation, every deletion, policy change, cloud upload (hash, bytes, endpoint, purpose), pause/resume; viewable in Inspector | C14 |
@@ -62,7 +62,7 @@ Executables under `$HOME` or another user-writable path get session-only grants 
 
 Resolution:
 - **Compositor:** resolve the `AppKey` at accept and check it again at bind.
-- **contextd:** read the peer with `SO_PEERPIDFD` instead of `pidfd_open` (no PID-reuse race). With opt-in `SO_PASSPIDFD`, drop each frame whose sender is not the accept-time process. This defeats the fork-then-exec trick on the Context API [A, not tested].
+- **contextd:** read the peer with `SO_PEERPIDFD` instead of `pidfd_open` (no PID-reuse race). With opt-in `SO_PASSPIDFD`, drop each message whose sender is not the accept-time process. This defeats the fork-then-exec trick on the Context API [A, not tested].
 - A plain exe path string, as used today, is weak. Fork-then-exec and mount namespaces can probably fake it [R, not tested].
 
 ### Scopes
@@ -74,7 +74,8 @@ Resolution:
 | `raw` | Raw text lines, exact clipboard and notification text, `export`. Needs fresh user auth (polkit `auth_self`, fprintd if enrolled) every `raw_reauth_minutes` (default 5) | Inspector only |
 | `memory_write` | `remember`, `correct` | Inspector, approved agents |
 | `memory_delete` | `forget` | Inspector, CLI (with auth) |
-| `policy_admin` | `set_policy`, change rules, retention and consent; global `pause` / `resume` on the Context API | crownos-settings, crownbar (pause menu), CLI (with auth) |
+| `pause` | `pause` / `resume` of observation on the Context API, nothing else | crownbar (pause menu), crownos-settings |
+| `policy_admin` | `set_policy`, change rules, retention and consent | crownos-settings, CLI (with auth) |
 | `engine` | Pause all observation through `set_paused` on the Wayland protocol; take captures | `spawned:crown-contextd` only |
 | `wayland.window_control`, `wayland.agent_cursor` | Today's trusted-agent Wayland globals | computer-use |
 
@@ -101,12 +102,17 @@ A new crownos-config section, shared by the compositor and contextd:
 )
 ```
 
-Migration: each `trusted_executables` entry in `agents.ron` becomes `exe:` with full scopes. Each `app_access` entry becomes `sandbox:`. `agents`, `visual_context` and `context_access` are added to the by-name config API and to the crownos-settings section list.
+Migration from `agents.ron`:
+- The `crown-contextd` entry of `trusted_executables` becomes `spawned:crown-contextd` with `engine`.
+- Every other `trusted_executables` entry becomes `exe:` with `metadata`, `text`, `pause`, `wayland.window_control` and `wayland.agent_cursor`. A migrated entry never gets `raw`, `engine` or `policy_admin`.
+- Each `app_access` entry becomes `sandbox:`.
+
+ `agents`, `visual_context` and `context_access` are added to the by-name config API and to the crownos-settings section list.
 
 ### First use, revocation and audit
 
 - **First use.** When an app with no grant binds or calls, the compositor parks the request and asks through the portal Access dialog. The dialog returns the choices "remember" and the scope. The dialog ignores synthetic input from `crownos_input`, the virtual keyboard and agent cursors, so an agent cannot click "Allow".
-- **Live revocation.** On a config change, the compositor and contextd recompute the scope of every live client. Wayland clients get the `revoked` event and an inert object ([07 §13.1](07-api.md#131-transports)). IPC peers are dropped with their subscriptions. Requests are checked one by one, so a revocation takes effect on the next frame.
+- **Live revocation.** On a config change, the compositor and contextd recompute the scope of every live client. Wayland clients get the `revoked` event and an inert object ([07 §13.1](07-api.md#131-transports)). IPC peers are dropped with their subscriptions. Requests are checked one by one, so a revocation takes effect on the next message.
 - **Audit.** Grants, denials, revocations, binds and the first use per session go to `crownpositor::audit::context` and to `audit.db` with the `AppKey` as actor.
 - **Agent bridge.** Agents that act through `crown-context-mcp` get the **agent's** grant, not the bridge's [A].
 
@@ -114,9 +120,9 @@ Migration: each `trusted_executables` entry in `agents.ron` becomes `exe:` with 
 
 | Unit | Hardening |
 |---|---|
-| `crown-contextd` | `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only` + `ReadWritePaths=%S/crownos/context %C/crownos/context`, `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX`, `MemoryDenyWriteExecute=yes`, `LockPersonality`, `SystemCallFilter=@system-service`, `CPUWeight=20`, `IOWeight=20`, `MemoryHigh=256M`, `Nice=10`. Frame protection: `PR_SET_DUMPABLE=0`, `LimitCORE=0`, `MemorySwapMax=0`, `MemoryZSwapMax=0`, `LimitMEMLOCK=128M` |
-| `crown-context-inferd` | As above, plus no access to `%S/crownos/context` (no DB), device access limited to GPU/NPU nodes (`DeviceAllow=/dev/dri/* /dev/accel/* /dev/nvidia*`), `MemoryHigh` per tier, `CPUSchedulingPolicy=idle` for batch jobs (interactive jobs use a separate high-priority thread), in-process **Landlock** ruleset for model dir + memfds [A: verify GPU driver compatibility with `MemoryDenyWriteExecute`]. Same frame protection as contextd |
-| `crown-context-relayd` | Hosts the HTTP backend. `IPAddressDeny=any` + `IPAddressAllow=` configured endpoints (localhost sidecars, LAN node, cloud), no filesystem write, text only, started only when an endpoint is configured |
+| `crown-contextd` | `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only` + `ReadWritePaths=%S/crownos/context %C/crownos/context`, `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX`, `MemoryDenyWriteExecute=yes`, `LockPersonality`, `SystemCallFilter=@system-service`, `CPUWeight=20`, `IOWeight=20`, `MemoryHigh=256M`, `Nice=10`. Frame protection: `LimitCORE=0`, `MemorySwapMax=0`, `MemoryZSwapMax=0`, `LimitMEMLOCK=128M` [A: a user unit cannot raise it above the user manager's hard limit]. In the binary: `prctl(PR_SET_DUMPABLE, 0)` at startup |
+| `crown-context-inferd` | As above, plus no access to `%S/crownos/context` (no DB), device access limited to GPU/NPU nodes (`DeviceAllow=/dev/dri/* /dev/accel/* /dev/nvidia*` [A: the user manager may not apply device rules]), `MemoryHigh` per tier, `CPUSchedulingPolicy=idle` for batch jobs (interactive jobs use a separate high-priority thread), in-process **Landlock** ruleset for model dir + memfds [A: verify GPU driver compatibility with `MemoryDenyWriteExecute`]. Same frame protection as contextd |
+| `crown-context-relayd` | Hosts the HTTP backend. `IPAddressDeny=any` + `IPAddressAllow=` configured endpoints (localhost sidecars, LAN node, cloud) [A: needs BPF support in the user manager], no filesystem write, text only, started only when an endpoint is configured |
 
 ## 11.5 Data minimization defaults (decision a)
 
@@ -146,7 +152,7 @@ Each capture is analysed at once. VCGE keeps the text and metadata and deletes t
 
 ### Frame memory
 
-- One memfd per capture: `memfd_create(MFD_CLOEXEC|MFD_ALLOW_SEALING|MFD_NOEXEC_SEAL)`, `mlock`, `madvise(MADV_DONTDUMP|MADV_WIPEONFORK)`.
+- One memfd per capture: `memfd_create(MFD_CLOEXEC|MFD_ALLOW_SEALING|MFD_NOEXEC_SEAL)`, `mlock`, `madvise(MADV_DONTDUMP|MADV_DONTFORK)` (`MADV_WIPEONFORK` is valid only for private anonymous mappings).
 - After capture, seal with `F_SEAL_FUTURE_WRITE|F_SEAL_SHRINK|F_SEAL_GROW`. Do not use `F_SEAL_WRITE`: it fails with `EBUSY` while a writable shared mapping exists [R, man page].
 - Pass the fd to inferd. inferd maps it read-only, analyses and unmaps.
 - contextd overwrites the buffer with `zeroize` and closes the fd.

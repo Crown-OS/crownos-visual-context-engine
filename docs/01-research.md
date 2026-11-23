@@ -1,6 +1,6 @@
 # 01: Research
 
-Tags: **[V]** verified from source or official docs · **[R]** reported by a secondary source · **[A]** assumption or design inference.
+Tags: **[V]** verified from source or official docs · **[V vendor]** verified source, vendor's own benchmark · **[R]** reported by a secondary source · **[A]** assumption or design inference · **[A, derived]** our calculation, not measured.
 Snapshot date: 2026-11-08. Section 4 adds the approach research of 2026-11-23.
 
 - Reference repos were cloned and read at these commits: screenpipe `32e9049`, aw-server-rust, awatcher, openrecall, sqlite-vec, Smithay `master@65aa86f`, niri `da0ab81`, cosmic-comp `46b26e6`.
@@ -313,7 +313,7 @@ The user answered the open decisions on 2026-11-23. Three research passes compar
 | Approach | Speed | Accuracy | Verdict |
 |---|---|---|---|
 | PP-OCRv6 det tiny + rec small on `ort`, changed crops only | Full 1080p frame 0.2–0.8 s on CPU [V vendor] | Recogniser 81.3 on the vendor set, not UI text [V vendor] | Primary candidate |
-| Tesseract 5 | ~1.1 s per 1080p screenshot [V] | Beat PaddleOCR on one light screenshot (N=1) [V] | Bake-off candidate |
+| Tesseract 5 | ~1.1 s per 1080p screenshot [R] | Beat PaddleOCR on one light screenshot (N=1) [R] | Bake-off candidate |
 | Small VLM transcribes everything | 10–30 s per dense window on an iGPU [A, derived] | Drops or invents small text [R] | Rejected for text |
 | Small VLM, short JSON caption on low-text frames | ~1 s on RTX, 4–6 s on an iGPU [A, derived] | Good for images, video, canvas [R] | Added, gated |
 | OmniParser `icon_detect_v3` | 0.6–0.8 s on a GPU [V vendor] | UI grounding, not text | dGPU-only option, later |
@@ -340,7 +340,7 @@ Sources: [PP-OCRv6 docs](https://www.paddleocr.ai/v3.7.0/en/version3.x/algorithm
 Findings:
 - GTK4 ignores `IsEnabled` and emits all events once any listener exists [V]. Qt6 limits events to the registered types [V]. Chromium reads `IsEnabled` only at startup and raises its mode by which calls a client makes [V]. Firefox caches the whole tree in the parent process since version 113 [V].
 - Pick: event-driven, then `GetMatches` / `GetItems` / a concurrent bounded walk by toolkit, with a Chromium call allowlist.
-- No published CPU or RAM cost per toolkit on Linux. The `bench-a11y` protocol measures it (gate: ≤ 5 % CPU, ≤ 10 % RSS above "off").
+- No published CPU or RAM cost per toolkit on Linux. The `bench-a11y` protocol measures it (gate: ≤ 5 % CPU, ≤ 10 % PSS above "off").
 - `odilia-cache` pins an old `atspi`; copy its design instead of depending on it [V].
 
 Sources: [Chromium ax_mode.h](https://chromium.googlesource.com/chromium/src/+/lkgr/ui/accessibility/ax_mode.h) · [accessibility_switches.cc](https://chromium.googlesource.com/chromium/src/+/HEAD/ui/accessibility/accessibility_switches.cc) · [browser_accessibility_state_impl_auralinux.cc](https://chromium.googlesource.com/chromium/src/+/HEAD/content/browser/accessibility/browser_accessibility_state_impl_auralinux.cc) · [Chromium accessibility performance](https://developer.chrome.com/blog/chromium-accessibility-performance) · [GTK a11y source](https://gitlab.gnome.org/GNOME/gtk/-/tree/main/gtk/a11y) · [Qt AT-SPI source](https://github.com/qt/qtbase/tree/dev/src/gui/accessible/linux) · [Firefox Platform.cpp](https://hg.mozilla.org/mozilla-central/file/tip/accessible/atk/Platform.cpp) · [Firefox 113 a11y](https://blog.mozilla.org/en/uncategorized/firefox-accessibility-boost/) · [at-spi2-core #85](https://gitlab.gnome.org/GNOME/at-spi2-core/-/issues/85) · [at-spi2-core #139](https://gitlab.gnome.org/GNOME/at-spi2-core/-/issues/139) · [Orca source](https://gitlab.gnome.org/GNOME/orca/-/tree/main/src/orca) · [atspi crate](https://docs.rs/crate/atspi/latest) · [odilia-cache](https://docs.rs/odilia-cache/0.3.0/src/odilia_cache/lib.rs.html)
@@ -369,8 +369,8 @@ Sources: [llama.cpp multimodal](https://raw.githubusercontent.com/ggml-org/llama
 | Identity approach | Can a same-user process fake it? | Verdict |
 |---|---|---|
 | `/proc/<pid>/exe` path string (current) | Probably yes: fork-then-exec, mount namespaces [R, not tested] | Weak |
-| `SO_PEERPIDFD` + exe `(dev, ino)` of a root-owned path | Closes PID reuse and mount namespaces, not fork-then-exec [R] | Medium |
-| Per-message `SO_PASSPIDFD` on crownos-ipc | Defeats fork-then-exec; only where we own the wire [R] | Use for the Context API |
+| `SO_PEERPIDFD` + exe `(dev, ino)` of a root-owned path | Closes PID reuse and mount namespaces, not fork-then-exec [R, not tested] | Medium |
+| Per-message `SO_PASSPIDFD` on crownos-ipc | Defeats fork-then-exec; only where we own the wire [R, not tested] | Use for the Context API |
 | `wp_security_context_v1` app id | No: the sandbox engine vouches [V] | Strong |
 | Compositor- or systemd-spawned connection | No: identity is "we spawned it" [A] | Strong, for first-party daemons |
 | Portal PermissionStore | Host app ids are self-claimed; D-Bus round trip per call [V] | Store only |

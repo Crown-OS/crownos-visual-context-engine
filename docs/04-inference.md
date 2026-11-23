@@ -1,6 +1,6 @@
 # 04 — Models and Inference
 
-Tags: **[V]** verified · **[R]** reported · **[A]** design decision / assumption to validate.
+Tags: **[V]** verified · **[V vendor]** verified source, vendor's own benchmark · **[R]** reported · **[A]** design decision / assumption to validate · **[A, derived]** our calculation, not measured.
 
 Model availability and licences were checked on Hugging Face and GitHub on 2026-11-08 and again on 2026-11-23. **Every model below is a bake-off candidate. Nothing was measured on CrownOS hardware yet.** Vendor numbers are marked as vendor numbers. The benchmark workstream ([08 §Phase 0](08-implementation-plan.md#phase-0--foundations-and-de-risking-spikes)) confirms or replaces each pick.
 
@@ -25,7 +25,7 @@ Bake-off machine: Ryzen 7 7840HS (XDNA1 NPU), Radeon 780M (Vulkan), RTX 4050 Lap
 | Reranker (interactive only) | Top-30 of interactive search | Qwen3-Reranker-0.6B [A] | bge-reranker-v2-m3 [A] | Apache / MIT | 0.6 B |
 | Summarize + extract (JSON schema) | Segment close (batched), episode close, consolidation. Text only | **Qwen3.5-2B / 4B** (natively multimodal) [V] | Qwen3-4B-Instruct-2507, Phi-4-mini (MIT), Gemma 4 E2B/E4B (Apache) [V] | Apache-2.0 | 2B Q4 ≈ 1.8–2.5 GB incl. mmproj |
 | Screen caption (VLM) | **At capture time**, only for low-text frames ([§10.6](#106-generative-call-design-keeps-llm-usage-rare)) | Same model as above (shared) | Qwen3-VL-2B [V]; SmolVLM2-500M for the CPU tier [V] | Apache-2.0 | — |
-| UI element detection (Phase 8) | At capture time, dGPU tier only, apps with no a11y and low OCR coverage | OmniParser **icon_detect_v3** (YOLOv9, **MIT**) [V] | — | MIT | ~60 MB |
+| UI element detection (`ui_detect`, Phase 8) | At capture time, dGPU tier only, apps with no a11y and low OCR coverage | OmniParser **icon_detect_v3** (YOLOv9, **MIT**) [V] | — | MIT | ~60 MB |
 | Document OCR | At capture time, for a static document page the user dwells on | PaddleOCR-VL-1.6 (0.96 B) [V]; Granite-Docling-258M [R] | Florence-2-base (MIT) | Apache / MIT | — |
 | Secret/PII NER | On all extracted text at capture time, and before any LAN or cloud request | Deterministic detectors + small LLM pass | — | — | — |
 
@@ -42,7 +42,7 @@ Excluded:
 | Approach | Speed (vendor or derived) | Accuracy | Verdict |
 |---|---|---|---|
 | PP-OCRv6 det tiny + rec small on `ort`, changed crops only | Full 1080p frame 0.2–0.8 s on CPU [V vendor]; crops take much less [A] | Recogniser 81.3 on the vendor set, which is not UI text [V vendor] | **Primary candidate** |
-| Tesseract 5 | ~1.1 s per 1080p screenshot on CPU [V] | Beat PaddleOCR on one light screenshot (N=1) [V] | Bake-off candidate |
+| Tesseract 5 | ~1.1 s per 1080p screenshot on CPU [R] | Beat PaddleOCR on one light screenshot (N=1) [R] | Bake-off candidate |
 | Small VLM transcribes the whole window | 10–30 s per dense window on an iGPU, limited by decode speed [A, derived] | Drops or invents small text [R] | Rejected for text |
 | Small VLM, short JSON caption, low-text frames only | ~1 s on an RTX GPU, 4–6 s on an iGPU [A, derived] | Good for images, video, canvas [R] | **Added, gated** |
 | OmniParser `icon_detect_v3` | 0.6–0.8 s on a GPU [V vendor] | UI grounding, not text | dGPU-only option, later |
@@ -74,7 +74,7 @@ Reference numbers, all from other hardware:
 
 | Crate | Role | Unsafe code |
 |---|---|---|
-| `context-infer` | Types (`Media`, `GenRequest`, `Output::{Text, Json(schema)}`), modality traits, task layer, `registry.ron` v2 loader, router. No runtime dependencies | Forbidden |
+| `context-infer` | Types (`RgbImage`, `GenRequest`, `Output::{Text, Json(schema)}`), modality traits, task layer, `registry.ron` v2 loader, router. No runtime dependencies | Forbidden |
 | `context-infer-ort` | `ort` runtime: OCR, embeddings, rerank, ASR. EPs: TensorRT, CUDA, OpenVINO (NPU/GPU), VitisAI, MIGraphX, CPU | Allowed (crate-level lint override) |
 | `context-infer-llama` | llama.cpp runtime: `Generate` (with `mtmd` for vision), GGUF embeddings. Devices: CUDA, Vulkan, ROCm, CPU as dynamically loaded ggml modules | Allowed (crate-level lint override) |
 | `context-infer-http` | OpenAI-compatible client: local sidecars (llama-server, Lemonade/FastFlowLM, OVMS), LAN node (Spark), cloud APIs | Forbidden |
@@ -82,25 +82,26 @@ Reference numbers, all from other hardware:
 
 The workspace keeps `unsafe_code = "forbid"` everywhere else [V]. The two runtime crates hold the mmap and FFI code.
 
-**Where the HTTP backend runs [A].** inferd has `PrivateNetwork=yes`, which also blocks localhost sidecars. So `crown-context-relayd` hosts `context-infer-http`. relayd gets text only, starts only when a sidecar, LAN or cloud endpoint is configured, and may reach only the configured addresses (`IPAddressAllow=`). Frames never reach relayd.
+**Where the HTTP backend runs [A].** inferd has `PrivateNetwork=yes`, which also blocks localhost sidecars. So `crown-context-relayd` hosts `context-infer-http`. relayd gets text only, starts only when a sidecar, LAN or cloud endpoint is configured, and may reach only the configured addresses (`IPAddressAllow=`; whether a user unit can apply it is a Phase 0 spike [A]). Frames never reach relayd.
 
 ### Traits and task layer (illustrative, not final Rust)
 
 ```rust
-pub trait Generate   { fn capabilities(&self) -> GenerateCapabilities; async fn generate(&self, request: GenRequest) -> Result<GenOutput, InferError>; }
-pub trait Embed      { fn space(&self) -> EmbedSpace; async fn embed(&self, inputs: &[EmbedInput]) -> Result<Vec<Vec<f32>>, InferError>; }
-pub trait Rerank     { async fn rerank(&self, query: &str, documents: &[&str]) -> Result<Vec<f32>, InferError>; }
-pub trait Ocr        { async fn recognise(&self, image: Media) -> Result<Vec<TextLine>, InferError>; }
-pub trait Transcribe { async fn transcribe(&self, audio: Media) -> Result<Transcript, InferError>; }
+pub trait Generate   { fn capabilities(&self) -> GenerateCapabilities; fn generate(&self, request: &GenRequest) -> Result<Generation, InferError>; }
+pub trait Embed      { fn space(&self) -> &EmbedSpace; fn embed(&self, texts: &[String], purpose: EmbedPurpose) -> Result<Embeddings, InferError>; }
+pub trait Rerank     { fn rerank(&self, query: &str, documents: &[String]) -> Result<Vec<f32>, InferError>; }
+pub trait Ocr        { fn recognize(&self, image: &RgbImage) -> Result<Vec<TextLine>, InferError>; }
+pub trait Transcribe { fn transcribe(&self, samples: &[i16]) -> Result<String, InferError>; }
 
 pub trait ContextTasks {
-    async fn read_text(&self, crops: CaptureCrops) -> Result<Vec<TextLine>, InferError>;
-    async fn describe_screen(&self, frame: CaptureFrame) -> Result<ScreenCaption, InferError>;
-    async fn summarize_segments(&self, segments: &[SegmentInput]) -> Result<Vec<SegmentSummary>, InferError>;
-    async fn embed_texts(&self, texts: &[&str]) -> Result<Embeddings, InferError>;
+    fn recognize_text(&self, image: &RgbImage, job: Job) -> Result<Vec<TextLine>, InferError>;
+    fn describe_screen(&self, screen: &RgbImage, app_name: &str, window_title: &str, job: Job) -> Result<ScreenDescription, InferError>;
+    fn summarize_segments(&self, segments: &[SegmentDigest], job: Job) -> Result<Vec<SegmentSummary>, InferError>;
+    fn embed_text(&self, texts: Vec<String>, purpose: EmbedPurpose, job: Job) -> Result<EmbeddedTexts, InferError>;
 }
 ```
 
+- The tasks are `recognize_text`, `embed_text`, `rerank`, `summarize_segments`, `describe_screen` and `transcribe`. `ui_detect` is a later task (Phase 8). `generate` is a capability trait under the tasks, not a task.
 - The task layer never names a model. The JSON schema of each output comes from its Rust type (`schemars`). Each backend lowers it: GBNF or llguidance in llama.cpp, `response_format` over HTTP.
 - Errors: `InferError::{Unavailable, Timeout, Backend, Schema}` (`thiserror`).
 - FFI calls run on a dedicated worker thread per loaded model.
@@ -128,7 +129,13 @@ A user override file can add or re-rank candidates. The registry in the repo is 
 
 ### Router
 
-The router is part of `context-infer` and runs in contextd's job scheduler [A]. inferd and relayd report their probe results through `capabilities()`. The router sends a job to inferd for an `Ort` or `Llama` candidate and to relayd for an `Http` candidate. Frame jobs go only to inferd.
+The router is part of the `context-infer` library and runs inside each backend host [A]:
+- inferd runs it over the `Ort` and `Llama` candidates;
+- relayd runs it over the `Http` candidates, because inferd has no network.
+
+contextd's scheduler does not rank models. For a text-only task it only picks local (inferd) or remote (relayd), and falls through to the other host on `Unavailable` or `Busy`. Vision tasks always go to inferd.
+
+**Swap limits.** A model or an in-process runtime can be swapped freely. A runtime that needs the network must live in relayd. Vision input never leaves the machine.
 
 1. **Candidates** are (model × runtime × device) for the task.
 2. **Filter** by probe result, policy and tier. The probe checks runtimes and devices without loading a model, as crownos-voice does [V]. Policy covers battery, consent for remote endpoints, and "frames never go to `Http`".
@@ -177,7 +184,7 @@ The router is part of `context-infer` and runs in contextd's job scheduler [A]. 
 
 | Call | Trigger | Input (bounded) | Output (JSON schema, grammar-enforced) | Budget |
 |---|---|---|---|---|
-| `summarize_segment_batch` | Every ~10 min or 8 closed segments, whichever first; only segments ≥ 60 s active or importance ≥ 0.4 | Per segment: app, title, url/file, label candidates, ≤ 600 tokens of deduped text | `{summary, activity_label, entities[{name,kind,alias}], facts[{s,p,o,confidence}], open_items[]}` per segment | ≤ 60 calls/day T1, ≤ 200 T2–T5 |
+| `summarize_segments` | Every ~10 min or 8 closed segments, whichever first; only segments ≥ 60 s active or importance ≥ 0.4 | Per segment: app, title, url/file, label candidates, ≤ 600 tokens of deduped text | `{summary, activity_label, entities[{name,kind,alias}], facts[{s,p,o,confidence}], open_items[]}` per segment | ≤ 60 calls/day T1, ≤ 200 T2–T5 |
 | `summarize_episode` | Episode close | segment summaries + top entities | `{title, summary, project_guess, outcome}` | ≤ 40/day |
 | `describe_screen` | **At capture time**, when a11y + OCR give < ~200 characters or image regions cover > ~40 % of the window. Skipped on battery. On T4, optionally every capture | The frame from the capture memfd (≤ 1280 px long edge [A]) + metadata | `{content_kind, caption, visible_entities[]}`, ≤ 128 tokens | ≤ 6/h and ≤ 50/day on T1–T3; T4 limited only by the gate. When the budget is empty, the frame keeps its OCR text only |
 | `resolve_entity` | Ambiguous merge only | two entity cards | `{same: bool, confidence}` | rare |
@@ -185,7 +192,7 @@ The router is part of `context-infer` and runs in contextd's job scheduler [A]. 
 
 ## 10.7 LAN and cloud through the HTTP backend
 
-LAN and cloud endpoints are ordinary `Http` runtimes in the registry. The router ranks them with the other candidates. The user decides which endpoints exist. All are off by default.
+LAN and cloud endpoints are ordinary `Http` runtimes in the registry. relayd's router ranks them; contextd picks local or remote per text task. The user decides which endpoints exist. All are off by default.
 
 - **LAN node** (a DGX Spark or workstation running llama-server, vLLM or TRT-LLM serve): paired once with mutual TLS (key exchange through CrownOS device pairing, for example crownlink) [A].
 - **Cloud API** (provider-agnostic OpenAI-compatible adapter).
