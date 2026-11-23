@@ -1,5 +1,6 @@
 //! The first-use question for an API caller. contextd runs the root-owned consent dialog
-//! itself: no D-Bus name is in the path, so no other process can answer for the user.
+//! itself and reads only its exit status: no D-Bus name and no output stream is in the path,
+//! so no other process can answer for the user.
 
 use crownos_config::consent_dialog::{ConsentOption, ConsentQuestion};
 use crownos_config::schema::AppKey;
@@ -20,13 +21,13 @@ pub(crate) struct AccessAnswer {
 /// Asks whether the app at `key` may use the Context API.
 pub(crate) async fn ask_api_access(key: &AppKey) -> Result<AccessAnswer, String> {
     let question = question(key);
-    let finished = tokio::process::Command::from(question.command())
+    let status = tokio::process::Command::from(question.command())
         .kill_on_drop(true)
-        .output()
+        .status()
         .await
         .map_err(|error| format!("cannot run the consent dialog: {error}"))?;
     let answer = question
-        .answer(finished.status.code(), &finished.stdout)
+        .answer(status.code())
         .map_err(|error| error.to_string())?;
     Ok(AccessAnswer {
         granted: answer.granted,

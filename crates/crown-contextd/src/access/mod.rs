@@ -10,8 +10,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use crownos_config::schema::{AppKey, ContextAccess, ContextDecision, Expiry, Scope, ScopeSet};
+use crownos_config::schema::{
+    AppKey, ContextAccess, ContextDecision, Expiry, FLATPAK_ENGINE, Scope, ScopeSet,
+};
 use crownos_ipc::{Caller, PeerId, RemoteError};
+
+use crate::util::flatpak_app::flatpak_app_id;
 
 pub(crate) use consent_dialog::AccessAnswer;
 pub(crate) use first_use::{answer_parked, park_or_refuse};
@@ -216,8 +220,19 @@ impl Grants {
     }
 }
 
-/// The key of a caller, from the program crownos-ipc read at accept.
+/// The key of a caller: its sandbox and app id, as the compositor keys a sandboxed client, or
+/// else the program crownos-ipc read at accept.
 fn caller_key(caller: Caller<'_>) -> Option<AppKey> {
+    let pid = caller.credentials.pid;
+    if let Some(app_id) = flatpak_app_id(pid) {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        return Some(AppKey::of_sandboxed_process(
+            FLATPAK_ENGINE,
+            &app_id,
+            pid,
+            home.as_deref(),
+        ));
+    }
     let program = caller.credentials.program.as_ref()?;
     AppKey::of_program(
         &program.executable,
