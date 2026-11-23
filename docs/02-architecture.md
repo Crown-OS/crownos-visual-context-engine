@@ -6,7 +6,7 @@ Tags: **[V]** verified · **[R]** reported · **[A]** design decision / assumpti
 
 Design rules:
 
-1. **Observe ≠ understand.** Observation is cheap, synchronous, lossless for metadata. Understanding is asynchronous, budgeted, batched per *activity segment*, and may be deferred or skipped.
+1. **Observe ≠ understand.** Observation is cheap, synchronous, lossless for metadata. Frame analysis runs at capture time, and then the pixels are deleted; a frame is never kept for later. Text understanding (summaries, extraction) is asynchronous, budgeted, batched per *activity segment*, and may be deferred or skipped.
 2. **The compositor never waits on VCGE.** All compositor→VCGE traffic is fire-and-forget Wayland events; capture is client-pulled.
 3. **Fewest processes that give real isolation:** a key-holding broker (`crown-contextd`) and a sandboxed, network-less, DB-less inference worker (`crown-context-inferd`). Everything else is optional.
 4. **One store, one writer.** SQLCipher SQLite, single writer task, read pool.
@@ -26,7 +26,7 @@ flowchart LR
     WB["Compositor Bridge<br/>(calloop wayland thread)"]
     COL["Collectors<br/>a11y · CrownUI tree · notify · clipboard · proc/project · files · power"]
     POL["Policy Gate"]
-    FP["Frame Pipeline<br/>tile diff · crop · thumbnail"]
+    FP["Frame Pipeline<br/>tile diff · crop · frame memfd"]
     COR["Correlator + Segmenter<br/>+ Activity Classifier"]
     WM["Working Memory"]
     MM["Memory Manager"]
@@ -38,12 +38,12 @@ flowchart LR
   end
 
   subgraph I["crown-context-inferd (sandboxed, no net, no DB)"]
-    REG["Model registry"]
-    ORT["OrtBackend<br/>OpenVINO · VitisAI · QNN · CUDA/TRT · CPU"]
-    LLM["LlamaBackend<br/>CUDA · Vulkan · CPU"]
+    REG["Task layer · registry v2 · router"]
+    ORT["context-infer-ort<br/>OpenVINO · VitisAI · CUDA/TRT · CPU"]
+    LLM["context-infer-llama<br/>CUDA · Vulkan · ROCm · CPU"]
   end
 
-  RELAY["crown-context-relayd<br/>(optional, consented cloud)"]
+  RELAY["crown-context-relayd<br/>context-infer-http: sidecars · LAN · cloud<br/>(optional, text only)"]
   MCP["crown-context-mcp<br/>(optional agent bridge)"]
   CLI["crown-context CLI / Inspector UI"]
   AGENTS["CrownOS agents · shell · launcher"]
@@ -68,7 +68,7 @@ flowchart LR
   RET --> ST
   API --> RET
   API --> AUD
-  SCH -. redacted payload .-> RELAY
+  SCH -. redacted text .-> RELAY
   API --- MCP --- AGENTS
   API --- CLI
   API -- capture state --> BAR
@@ -90,10 +90,10 @@ flowchart LR
 
 ## 5. Compositor bridge: `crownos_context_v1`
 
-New XML in `crownos-protocols/protocols/crownos_context_v1.xml`; server impl in `crownpositor/compositor/src/context/`. Privileged (no security-context) **and** pidfd-verified VCGE executable [A, reviewer decision #4]. Single binding at a time.
+XML in `crownos-protocols/protocols/crownos-context-v1.xml`; server impl in `crownpositor/compositor/src/context/`. **Version 2** (decision d): any app may bind. Each client gets the scope of its grant in `context_access.ron`, resolved from its `AppKey` ([05 §11.3](05-privacy-security.md#113-caller-identity-and-scopes)). Many clients can bind at once. Only a client with the `engine` scope (crown-contextd) can pause observation for everyone ([07 §13.1.1](07-api.md#1311-crownos_context_v1-version-2)).
 
 ```
-crownos_context_manager_v1                       (global, privileged)
+crownos_context_manager_v1                       (global, version 2, any client; filtered per scope)
   ── events ──
   window(new_id crownos_context_window_v1, string foreign_toplevel_identifier)
   focus(object<crownos_context_window_v1>? window, uint time_ms)
@@ -105,8 +105,10 @@ crownos_context_manager_v1                       (global, privileged)
   selection(uint kind, object window?, string mime_types, uint size_hint, uint flags)
                                           # kind: clipboard|primary; flags: secret
   paused(uint paused, uint origin)        # origin: hotkey | engine | lock
+  revoked                                 # v2: grant removed; object is inert
   ── requests ──
-  set_paused(uint paused)
+  set_paused(uint paused)                 # v2: pauses only this client's stream,
+                                          # unless the client holds `engine`
   destroy
 
 crownos_context_window_v1
@@ -121,7 +123,8 @@ crownos_context_window_v1
   done
   closed
   ── requests ──
-  flag_sensitive(uint reason, uint duration_ms)   # engine-side detectors feed the veto
+  flag_sensitive(uint reason, uint duration_ms)   # any bound client; rate-limited;
+                                                  # engine-side detectors feed the veto
   destroy
 
 crownos_capture_privacy_v1                       (global, any client)
@@ -133,7 +136,8 @@ Compositor implementation notes [A]:
 
 - **Window fan-out:** one internal `WindowEvent` enum produced at the existing choke points (`update_keyboard_focus`, `title_changed/app_id_changed`, map/unmap, `refresh_foreign_toplevels`) and fanned out to both `crownos_context_v1` **and the already-declared `crownos_plugin_host_v1` window events** (fixing that gap for crownplugind for free).
 - **Sensitivity state machine** per toplevel: OR of `text-input purpose ∈ {Password, Pin}`, private-browsing rule match, policy exclusion (pushed by contextd as rule set — see below), `crownos_capture_privacy_v1`, engine flag (with expiry), session locked.
-- **Capture veto:** VCGE's `ext-image-copy-capture` sessions for a sensitive window fail frames (`failed` reason `stopped`) and `capture_constraints` returns `None` for excluded sources; output-source capture by VCGE is disabled by default (window-only capture).
+- **Capture veto:** VCGE's `ext-image-copy-capture` sessions for a sensitive window fail frames (`failed` reason `stopped`) and `capture_constraints` returns `None` for excluded sources; output-source capture by VCGE is disabled by default (window-only capture). Output screencopy and screencast for other clients blank sensitive windows.
+- **Per-client scope:** `ContextState.bound` is a list of bound clients, each with its scope. A `metadata` client gets no `title` and no `selection` events. On a config reload the compositor recomputes every scope and sends `revoked` where a grant is gone.
 - **Exclusion rules** (app_id globs, title regexes per locale) are read by the compositor from `~/.config/crownos/visual_context.ron` via `crownos-config::subscribe_typed` so the veto works **even when contextd is not running or is compromised**.
 - **Input buckets:** counters in the input path; emission timer every 2 s only when non-zero; text counters zeroed while sensitive.
 - **Pause hotkey** (default `Super+Shift+.`, configurable) toggles compositor-side pause: no context events, all VCGE captures fail; indicator updated.
@@ -149,25 +153,25 @@ All in Rust (edition 2024, toolchain pinned with the rest of CrownOS). `thiserro
 |---|---|---|---|---|---|---|---|
 | C0 | **Compositor context module** | crownpositor | Window fan-out, pid/pidfd, sensitivity + veto, input buckets, selection metadata, pause | Smithay hooks → Wayland events | `crownos_context_v1`, `crownos_capture_privacy_v1` | Never blocks; if client is slow, Wayland buffers; client disconnect = all VCGE sessions dropped | < 50 µs/event, ~0 RAM |
 | C1 | **Compositor Bridge** | contextd (dedicated calloop thread) | Bind globals, maintain window table keyed by foreign-toplevel id, own capture sessions (focused window only), forward typed `Observation`s | Wayland → bounded channel | crate `context-collect::compositor` | Reconnect with backoff; on reconnect rebuild window table; missing global → degrade to metadata-less mode and report status | 1 thread, < 5 MB |
-| C2 | **Accessibility Extractor** | contextd (tokio task) | Event-driven AT-SPI subscription, focused-subtree text, URL (`DocURL`), password-role detection → `flag_sensitive` | a11y events → `A11yText`, `SensitiveHint` | `atspi` crate | Per-app timeouts (200 ms), node budget, circuit-breaker per app that misbehaves | < 10 MB |
+| C2 | **Accessibility Extractor** | contextd (tokio task) | Session-wide bus (`IsEnabled` set at session start). Event-driven subscription to a minimum event set; text fetch by `GetMatches` (Qt, ATK bridge), `GetItems` (GTK4) or a bounded concurrent walk; Chromium call allowlist; SHOWING/VISIBLE filter; URL (`DocURL`); password-role detection → `flag_sensitive` | a11y events → `A11yText`, `SensitiveHint` | `atspi` 0.30 | Per-app timeouts (200 ms), node budget (2,000), adaptive backoff, dead/hung object cache, SimHash dedup | < 10 MB |
 | C3 | **CrownUI Tree Reader** | contextd | For CrownUI apps with agent-access grant, read `ui://tree` via MCP socket | MCP → `A11yText` (structured) | `crownui/mcp` client | Missing grant → skip | small |
 | C4 | **System Collectors** | contextd | Notifications (crownotify `NotificationPosted`), clipboard content for allowed sources (crownos-clipboard `get`), process/app/project resolution (pidfd→cgroup→desktop entry; terminal cwd→git root), recent files (`recently-used.xbel`), power/PSI/thermal/NVML | IPC/proc/inotify → `Observation` | crownos-ipc clients, `monitor-system` resolver | Each collector independent; failures logged + status flag | < 10 MB |
 | C5 | **Policy Gate** | contextd (inline) | Every observation and every derived artifact passes: exclusions, sensitivity, per-app text/clipboard/notification permissions, secret detectors (regex+entropy), retention class assignment | `Observation` → `Admitted<Observation>` or drop + counter | crate `context-policy` | Fail **closed**: unknown policy state = drop | µs per item |
-| C6 | **Frame Pipeline** | contextd (`spawn_blocking`, semaphore 1) | Capture scheduling per trigger, damage-restricted tile hashing, volatile-region masking, crop of changed text regions, thumbnail encode (JPEG, 1280 px), OCR job emission | trigger + frame + damage → `OcrJob`, `Thumbnail` | crate `context-capture` | Frame failure/veto → record "capture_denied" metric only; never retry sensitive | ≤ 1 capture / 2 s hard cap; < 15 ms CPU per capture excl. OCR |
+| C6 | **Frame Pipeline** | contextd (`spawn_blocking`, semaphore 1) | Capture scheduling per trigger, frame in a per-capture memfd, damage-restricted tile hashing, volatile-region masking, crop of changed text regions, OCR and VLM-caption job emission, secret detection on the result, then zeroize and close ([05 §11.6](05-privacy-security.md#116-analyse-then-delete)) | trigger + frame + damage → `OcrJob`, `CaptionJob` → text lines, caption | crate `context-capture` | Frame failure/veto → record "capture_denied" metric only; never retry sensitive. RAM queue ≤ 3 frames / 64 MB, 60 s TTL, then `frame_dropped_unanalysed` | ≤ 1 capture / 2 s hard cap; < 15 ms CPU per capture excl. OCR |
 | C7 | **Correlator + Segmenter + Classifier** | contextd | Sliding 10-min event window; joins (input→damage→capture cause, copy→source window, notification→app), heartbeat-merged **activity segments**, task-level **episodes**, activity labels (rules + embedding centroids) | `Admitted<Observation>` → `SegmentEvent`, `EpisodeEvent`, `WorkingMemory` updates | crate `context-engine` | Pure, deterministic, replay-testable; state snapshotted every 60 s | < 20 MB |
 | C8 | **Working Memory** | contextd (in-RAM) | Current focus, segment, episode guess, recent entities (LRU 64), open documents, last N segment summaries | C7 → API | API `current_context`, subscriptions | Snapshot/restore on restart | < 5 MB |
 | C9 | **Memory Manager** | contextd | Persist segments/episodes; request derivations (embed, summarize, extract); entity resolution; fact upsert with bi-temporal invalidation; provenance; importance/confidence; deletion cascade | events + job results → store rows | crate `context-engine::memory` | Idempotent writes keyed by content hash; jobs retried with backoff, expired by deadline | — |
-| C10 | **Job Scheduler** | contextd | Priority queue with deadlines; per-tier token buckets (captures, OCR, embed, LLM, VLM, cloud) scaled by power/thermal/PSI/fullscreen-game; batching; dispatch to inferd/relayd | jobs → inferd requests | crownos-ipc + memfd | Back-pressure: coalesce (latest wins per window), drop expired, never unbounded | — |
-| C11 | **Consolidation Worker** | contextd job set (runs in inferd for model work) | Idle+AC: day/episode rollups, project memory refresh, fact dedup/invalidation, procedure mining, preference updates, retention pruning, re-embedding after model change, vacuum | store → store | internal | Checkpointed, resumable, abortable on user activity | runs only when idle |
+| C10 | **Job Scheduler** | contextd | Priority queue with deadlines; per-tier token buckets (captures, OCR, embed, LLM, VLM, cloud) scaled by power/thermal/PSI/fullscreen-game; batching; dispatch to inferd (frames and text) or relayd (text only) | jobs → inferd / relayd requests | crownos-ipc + memfd | Back-pressure: coalesce (latest wins per window), drop expired, never unbounded. Frame jobs are never persisted | — |
+| C11 | **Consolidation Worker** | contextd job set (runs in inferd for model work) | Idle+AC: day/episode rollups, project memory refresh, fact dedup/invalidation, procedure mining, preference updates, retention pruning, re-embedding of stored text after a model change, vacuum | store → store | internal | Checkpointed, resumable, abortable on user activity | runs only when idle |
 | C12 | **Retrieval Engine** | contextd | Hybrid search (FTS5 BM25 + vector KNN + graph expansion + temporal filters) fused by RRF, optional rerank, context packing with token budget and caller-scope redaction | query → ranked results / `ContextPack` | crate `context-engine::retrieve` | Timeouts per stage, partial results flagged | p95 < 150 ms (no rerank) |
-| C13 | **Store** | contextd | Schema/migrations, single writer task (coalesced transactions), read pool, media files | rows ↔ SQLite | crate `context-store` | WAL, `synchronous=NORMAL`, integrity check at startup, auto-backup of key metadata | — |
-| C14 | **Context API** | contextd | Typed crownos-ipc service; caller identity (SO_PEERCRED + pidfd → exe + cgroup app), scope checks, rate limits, audit | requests → replies/events | [07-api.md](07-api.md) | Per-connection limits (crownos-ipc: 32 conns/uid, 64 subs) [V] | — |
-| C15 | **Inference Worker** | `crown-context-inferd` | Model registry, backend selection per host, model load/unload on idle, task execution (ocr, embed_text, embed_image, ui_detect, summarize, extract, vlm_describe, rerank) | job (memfd payload) → result | crownos-ipc `crownos-visual-context-infer` | Crash → systemd restart; contextd requeues in-flight jobs once; per-backend circuit breaker falls back to CPU | see [06](06-performance.md) |
-| C16 | **Cloud Relay** (optional) | `crown-context-relayd` | Consent check, re-verify redaction, provider adapters (OpenAI-compatible incl. LAN DGX Spark; vendor APIs), audit every upload | redacted payload → response | crownos-ipc; HTTPS | Disabled unless consent; network restricted by `IPAddressAllow` | ~10 MB, on demand |
+| C13 | **Store** | contextd | Schema/migrations, single writer task (coalesced transactions), read pool. No pixels | rows ↔ SQLite | crate `context-store` | WAL, `synchronous=NORMAL`, integrity check at startup, auto-backup of key metadata | — |
+| C14 | **Context API** | contextd | Typed crownos-ipc service; caller `AppKey` (`SO_PEERPIDFD`, opt-in `SO_PASSPIDFD`), per-request scope check against `context_access.ron`, live revocation, rate limits, audit | requests → replies/events | [07-api.md](07-api.md) | Per-connection limits (crownos-ipc: 32 conns/uid, 64 subs) [V] | — |
+| C15 | **Inference Worker** | `crown-context-inferd` | Task layer, registry v2 and router over the ort and llama backends ([04 §10.4](04-inference.md#104-model-layer-in-context-infer)), model load/unload on idle, tasks (read_text, describe_screen, embed_text, rerank, generate, ui_detect) | job (memfd payload) → result | crownos-ipc `crownos-visual-context-infer` | Crash → systemd restart; contextd requeues in-flight text jobs once, frame jobs only within their TTL; circuit breaker per (runtime, device) falls through to the next candidate | see [06](06-performance.md) |
+| C16 | **HTTP backend host** (optional) | `crown-context-relayd` | `context-infer-http`: OpenAI-compatible local sidecars, LAN node (DGX Spark), cloud APIs. Consent check, re-verify redaction, audit every request. Text only | redacted text → response | crownos-ipc; HTTP(S) | Not started until an endpoint is configured; network restricted by `IPAddressAllow` | ~10 MB, on demand |
 | C17 | **Agent bridge** (optional) | `crown-context-mcp` | Expose API as MCP tools/resources for CrownOS agents with the agent's scopes | MCP ↔ API | rmcp (as crownui) | Stateless | small |
 | C18 | **CLI / Inspector** | `crown-context`, later CrownUI app in crownos-settings | Inspect, search, explain provenance, forget, pause, export, benchmark | — | API | — | — |
 
-**Lifecycle:** `crown-contextd.socket` + `.service` as **systemd user units** (pattern of `crown-voiced` [V]) started at graphical session; `crown-context-inferd` socket-activated by contextd's first job and exits after configurable idle (default 10 min) to release model memory; relayd socket-activated only if cloud consent exists. contextd stops all capture on `session=locked` and on `paused`.
+**Lifecycle:** `crown-contextd.socket` + `.service` as **systemd user units** (pattern of `crown-voiced` [V]) started at graphical session; `crown-context-inferd` socket-activated by contextd's first job and exits after configurable idle (default 10 min) to release model memory; relayd socket-activated only if an HTTP endpoint is configured. contextd stops all capture on `session=locked` and on `paused`.
 
 ---
 
@@ -183,16 +187,18 @@ flowchart TD
   G -- dropped --> X[(counters only)]
   G --> E[Event log row<br/>heartbeat-merged]
   G --> K[Correlator]
-  K -->|capture trigger| F[Frame Pipeline]
+  K -->|capture trigger| F[Frame Pipeline<br/>frame in memfd]
   F -->|changed text crops| O[OCR job]
+  F -->|low-text frame| V[VLM caption job]
+  O & V --> Z[zeroize frame<br/>no pixels kept]
   O --> T[Window text state<br/>line-level delta]
+  V --> T
   B --> T
   T --> S[Activity Segment<br/>open/extend/close]
   K --> S
   S -->|close| J1[embed segment text]
   S -->|close & important| J2[summarize + extract<br/>JSON schema, small LLM]
-  S -->|low text coverage & important| J3[VLM describe keyframe]
-  J1 & J2 & J3 --> M[Memory Manager]
+  J1 & J2 --> M[Memory Manager]
   M --> EP[(Episodic)]
   M --> SEM[(Entities/Facts/Edges<br/>bi-temporal)]
   M --> WMEM[Working memory]
@@ -219,11 +225,16 @@ sequenceDiagram
     C-->>B: failed(stopped)
   else
     C-->>B: ready + damage[rects]
-    B->>F: frame (shm), damage
+    B->>F: frame (shm in a per-capture memfd), damage
     F->>F: hash 32px tiles inside damage, mask volatile regions
-    F->>I: OCR(det+rec) on changed crops (memfd)
+    F->>I: OCR(det+rec) on changed crops (sealed memfd)
     I-->>F: lines + boxes + confidences
-    F->>B: TextDelta(win, +lines, -lines), thumbnail?
+    opt low-text frame, not on battery
+      F->>I: describe_screen(frame memfd)
+      I-->>F: content_kind, caption, visible_entities
+    end
+    F->>F: secret detectors on text, zeroize frame, close memfd
+    F->>B: TextDelta(win, +lines, -lines), caption?
   end
 ```
 
