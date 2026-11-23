@@ -353,6 +353,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "context-infer-client"
+version = "0.1.0"
+dependencies = [
+ "context-infer",
+ "context-protocol",
+ "context-shm",
+ "crownos-ipc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "context-infer-http"
 version = "0.1.0"
 dependencies = [

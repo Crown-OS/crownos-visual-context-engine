@@ -13,7 +13,9 @@ use crate::router::EmbeddedTexts;
 
 pub use describe::{ContentKind, ScreenDescription};
 pub use routed::RoutedTasks;
-pub use summarize::{Entity, Fact, SegmentDigest, SegmentSummary, summarize_prompt};
+pub use summarize::{
+    Entity, Fact, SegmentDigest, SegmentSummaries, SegmentSummary, summarize_prompt,
+};
 pub use templates::{PROMPT_TEMPLATES, PromptTemplate};
 
 pub trait ContextTasks: Send + Sync {

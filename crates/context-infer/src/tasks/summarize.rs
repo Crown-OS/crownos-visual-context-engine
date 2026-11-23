@@ -40,9 +40,10 @@ pub struct SegmentSummary {
     pub open_items: Vec<String>,
 }
 
+/// The JSON answer of `summarize_segments`.
 #[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct SegmentSummaries {
-    pub(crate) segments: Vec<SegmentSummary>,
+pub struct SegmentSummaries {
+    pub segments: Vec<SegmentSummary>,
 }
 
 pub(crate) const SUMMARIZE_SYSTEM_PROMPT: &str = "You summarize segments of computer activity \

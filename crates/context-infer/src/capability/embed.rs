@@ -16,6 +16,30 @@ pub struct EmbedSpace {
     pub dimensions: u32,
 }
 
+/// Reads the [`Display`](fmt::Display) form `model/Runtime/quantization/dimensions`.
+impl std::str::FromStr for EmbedSpace {
+    type Err = InferError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let invalid = || InferError::InvalidInput(format!("the embedding space {text}"));
+        let mut parts = text.rsplitn(4, '/');
+        let dimensions = parts.next().and_then(|value| value.parse().ok());
+        let quantization = parts.next();
+        let runtime = parts
+            .next()
+            .and_then(|name| ron::from_str::<Runtime>(name).ok());
+        match (parts.next(), runtime, quantization, dimensions) {
+            (Some(model), Some(runtime), Some(quantization), Some(dimensions)) => Ok(Self {
+                model: model.to_owned(),
+                runtime,
+                quantization: quantization.to_owned(),
+                dimensions,
+            }),
+            _ => Err(invalid()),
+        }
+    }
+}
+
 impl fmt::Display for EmbedSpace {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -78,6 +102,18 @@ pub trait Embed: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_space_reads_back_from_its_text() {
+        let space = EmbedSpace {
+            model: "qwen3-embedding-0.6b".into(),
+            runtime: Runtime::OnnxRuntime,
+            quantization: "int8".into(),
+            dimensions: 256,
+        };
+        assert_eq!(space.to_string().parse::<EmbedSpace>().ok(), Some(space));
+        assert!("no-slashes".parse::<EmbedSpace>().is_err());
+    }
 
     #[test]
     fn a_pushed_vector_is_cut_and_has_unit_length() {

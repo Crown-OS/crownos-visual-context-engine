@@ -29,5 +29,5 @@ pub use router::{
 pub use task::Task;
 pub use tasks::{
     ContentKind, ContextTasks, Entity, Fact, PROMPT_TEMPLATES, PromptTemplate, RoutedTasks,
-    ScreenDescription, SegmentDigest, SegmentSummary, summarize_prompt,
+    ScreenDescription, SegmentDigest, SegmentSummaries, SegmentSummary, summarize_prompt,
 };

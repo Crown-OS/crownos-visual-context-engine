@@ -49,6 +49,14 @@ impl Output {
         Self::Json(Arc::new(schema_for::<T>()))
     }
 
+    /// The schema as JSON text, for another process; `None` for plain text.
+    pub fn schema_text(&self) -> Option<String> {
+        match self {
+            Self::Text => None,
+            Self::Json(schema) => serde_json::to_string(schema.as_value()).ok(),
+        }
+    }
+
     /// A schema that another process sent as JSON text.
     pub fn json_from_text(schema: &str) -> Result<Self, InferError> {
         let invalid = |error: String| InferError::InvalidInput(format!("the schema: {error}"));
