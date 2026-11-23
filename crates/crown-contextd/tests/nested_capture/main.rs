@@ -9,14 +9,12 @@
 //! minutes while crown-contextd captures it. Then the state directory, the runtime directories,
 //! `/tmp`, `/dev/shm` and every database value must hold no run of those pixels and no image.
 //!
-//! Run it with the compositor binary in `VCGE_NESTED_COMPOSITOR`:
-//!
-//! ```sh
-//! VCGE_NESTED_COMPOSITOR=/path/to/crownpositor \
-//!     cargo test -p crown-contextd --test nested_capture -- --ignored --nocapture
-//! ```
+//! The compositor gives the Engine scope only to a root-owned `/usr/bin/crown-contextd`, so
+//! the tests run in a user and mount namespace where an overlay puts this build there. Run them
+//! through `run-in-namespace.sh`, with the compositor binary in `VCGE_NESTED_COMPOSITOR`.
 
 mod fake_inferd;
+mod integrated;
 mod pixel_search;
 mod test_window;
 
@@ -33,6 +31,11 @@ use pixel_search::{Findings, Search};
 use test_window::{HEIGHT, WIDTH};
 
 const RUN_LENGTH: Duration = Duration::from_secs(120);
+/// The one executable that may hold the Engine scope.
+const ENGINE: &str = "/usr/bin/crown-contextd";
+/// No X11 bridge, so the nested session does not take an X display, which every session on the
+/// machine shares.
+const NO_X11_BRIDGE: &str = "/nonexistent/xwayland-satellite";
 /// The test runs its window in a second process of itself, without `WORKSPACE`, so the window
 /// opens on the nested compositor's own output and gets the focus.
 const WINDOW_SOCKET_ENV: &str = "VCGE_TEST_WINDOW_SOCKET";
@@ -140,21 +143,27 @@ fn wait_for_socket(runtime: &Path, timeout: Duration) -> PathBuf {
     );
 }
 
-fn write_config(config: &Path, contextd: &Path) {
+fn assert_engine_is_this_build() {
+    let built = fs::read(env!("CARGO_BIN_EXE_crown-contextd")).unwrap();
+    assert!(
+        fs::read(ENGINE).is_ok_and(|installed| installed == built),
+        "{ENGINE} is not this build; run the test through run-in-namespace.sh"
+    );
+}
+
+/// `agents.ron` names the engine, so the compositor migrates its Engine grant at startup.
+fn write_config(config: &Path) {
     fs::write(
         config.join("agents.ron"),
-        format!(
-            "(trusted_executables: [{:?}], ask_for_app_access: false, app_access: {{}})",
-            contextd.display().to_string()
-        ),
+        format!("(trusted_executables: [{ENGINE:?}], ask_for_app_access: false, app_access: {{}})"),
     )
     .unwrap();
     fs::write(config.join("visual_context.ron"), "(enabled: true)").unwrap();
 }
 
-fn needles_for_all_rounds() -> PixelNeedles {
+fn needles_for_all_rounds(run_length: Duration) -> PixelNeedles {
     let mut needles = PixelNeedles::default();
-    let rounds = RUN_LENGTH.as_secs() / ROUND_LENGTH.as_secs() + 2;
+    let rounds = run_length.as_secs() / ROUND_LENGTH.as_secs() + 2;
     for round in 0..rounds {
         needles.add_xrgb(&noise_pixels(seed_for(round), WIDTH, HEIGHT));
     }
@@ -167,13 +176,13 @@ fn no_pixels_reach_disk_after_two_minutes_of_capture() {
     let compositor_binary = PathBuf::from(
         std::env::var_os("VCGE_NESTED_COMPOSITOR").expect("set VCGE_NESTED_COMPOSITOR"),
     );
-    let contextd_binary = fs::canonicalize(env!("CARGO_BIN_EXE_crown-contextd")).unwrap();
+    assert_engine_is_this_build();
     let root = std::env::temp_dir().join(format!("vcge-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let runtime = private_directory(&root.join("runtime"));
     let config = private_directory(&root.join("config"));
     let state = private_directory(&root.join("state"));
-    write_config(&config, &contextd_binary);
+    write_config(&config);
     let started = SystemTime::now();
 
     let mut compositor = Process::start(
@@ -181,6 +190,9 @@ fn no_pixels_reach_disk_after_two_minutes_of_capture() {
         Command::new(&compositor_binary)
             .env("CROWN_BACKEND", "winit")
             .env("WORKSPACE", "headless")
+            .env("CROWN_XWAYLAND_SATELLITE", NO_X11_BRIDGE)
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .env_remove("AT_SPI_BUS_ADDRESS")
             .env("CROWN_CONFIG_DIR", &config)
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("WAYLAND_DISPLAY", parent_display()),
@@ -189,7 +201,7 @@ fn no_pixels_reach_disk_after_two_minutes_of_capture() {
     let socket = wait_for_socket(&runtime, Duration::from_secs(30));
     eprintln!("the nested compositor listens on {}", socket.display());
     let services = private_directory(&runtime.join("crownos"));
-    let ocr_calls = fake_inferd::start(&services);
+    let ocr_calls = fake_inferd::start(&services, 2);
 
     let mut window = Process::start(
         "test window",
@@ -202,12 +214,16 @@ fn no_pixels_reach_disk_after_two_minutes_of_capture() {
     std::thread::sleep(Duration::from_secs(2));
     let mut contextd = Process::start(
         "crown-contextd",
-        Command::new(&contextd_binary)
+        Command::new(ENGINE)
             .arg("--state-dir")
             .arg(&state)
             .arg("--socket-dir")
             .arg(&services)
             .env_remove("WORKSPACE")
+            .env_remove("LD_PRELOAD")
+            .env_remove("LD_LIBRARY_PATH")
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .env_remove("AT_SPI_BUS_ADDRESS")
             .env("WAYLAND_DISPLAY", &socket)
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("CROWN_CONFIG_DIR", &config)
@@ -262,7 +278,14 @@ fn no_pixels_reach_disk_after_two_minutes_of_capture() {
     );
     drop(store);
 
-    let needles = needles_for_all_rounds();
+    assert_no_pixels_on_disk(&root, &state, started, RUN_LENGTH);
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// No run of the test window's pixels and no image in the state directory, its database, the
+/// runtime directories, `/tmp` or `/dev/shm`. A planted run proves that the search finds one.
+fn assert_no_pixels_on_disk(root: &Path, state: &Path, started: SystemTime, run_length: Duration) {
+    let needles = needles_for_all_rounds(run_length);
     let control = root.join("positive-control.bin");
     fs::write(
         &control,
@@ -270,13 +293,13 @@ fn no_pixels_reach_disk_after_two_minutes_of_capture() {
     )
     .unwrap();
     let mut planted = Findings::default();
-    let own = [root.clone()];
+    let own = [root.to_owned()];
     let search = Search {
         needles: &needles,
         changed_since: started,
         own_directories: &own,
     };
-    search.directory(&root, &mut planted);
+    search.directory(root, &mut planted);
     assert_eq!(
         planted.pixel_runs,
         std::slice::from_ref(&control),
@@ -285,9 +308,9 @@ fn no_pixels_reach_disk_after_two_minutes_of_capture() {
     fs::remove_file(&control).unwrap();
 
     let mut findings = Findings::default();
-    let values = pixel_search::database(&state, &needles, &mut findings);
+    let values = pixel_search::database(state, &needles, &mut findings);
     for directory in [
-        root.clone(),
+        root.to_owned(),
         PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap()),
         PathBuf::from("/tmp"),
         PathBuf::from("/dev/shm"),
@@ -299,7 +322,6 @@ fn no_pixels_reach_disk_after_two_minutes_of_capture() {
         findings.files_scanned
     );
     assert!(findings.is_clean(), "frame data on disk: {findings:?}");
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]

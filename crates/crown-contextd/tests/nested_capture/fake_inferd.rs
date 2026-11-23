@@ -1,6 +1,7 @@
 //! A stand-in for crown-context-inferd on the test's socket. OCR answers with planted text: a
 //! harmless line for the first calls, then a line with an AWS key, so the test sees OCR text
-//! reach the store and a secret stop it.
+//! reach the store and a secret stop it. A test that plants its secret elsewhere gets the
+//! harmless line only.
 
 use std::os::fd::OwnedFd;
 use std::path::Path;
@@ -17,12 +18,12 @@ use crownos_ipc::{RemoteError, ServiceBuilder};
 
 pub(crate) const HARMLESS_LINE: &str = "release notes for the nested capture test";
 pub(crate) const SECRET_LINE: &str = "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
-const HARMLESS_CALLS: usize = 2;
 
 type Answer<T> = Result<InferReply<T>, RemoteError>;
 
 struct FakeInferd {
     ocr_calls: Arc<AtomicUsize>,
+    harmless_calls: usize,
 }
 
 impl Handler for FakeInferd {
@@ -43,7 +44,7 @@ impl Handler for FakeInferd {
             )));
         }
         let call = self.ocr_calls.fetch_add(1, Ordering::SeqCst);
-        let text = if call < HARMLESS_CALLS {
+        let text = if call < self.harmless_calls {
             HARMLESS_LINE
         } else {
             SECRET_LINE
@@ -115,9 +116,9 @@ impl Handler for FakeInferd {
     }
 }
 
-/// Serves on its own thread in `directory` for the rest of the process. Returns the OCR call
-/// count.
-pub(crate) fn start(directory: &Path) -> Arc<AtomicUsize> {
+/// Serves on its own thread in `directory` for the rest of the process. OCR reads the secret
+/// from call `harmless_calls` on. Returns the OCR call count.
+pub(crate) fn start(directory: &Path, harmless_calls: usize) -> Arc<AtomicUsize> {
     let ocr_calls = Arc::new(AtomicUsize::new(0));
     let mut server = ServiceBuilder::new(INFERENCE_SERVICE)
         .directory(directory)
@@ -126,7 +127,10 @@ pub(crate) fn start(directory: &Path) -> Arc<AtomicUsize> {
     std::thread::spawn({
         let ocr_calls = Arc::clone(&ocr_calls);
         move || {
-            let mut handler = FakeInferd { ocr_calls };
+            let mut handler = FakeInferd {
+                ocr_calls,
+                harmless_calls,
+            };
             let _ = crownos_ipc::blocking::serve(&mut server, |server, peer, message| {
                 inference::dispatch(&mut handler, server, peer, message).map(|()| true)
             });
