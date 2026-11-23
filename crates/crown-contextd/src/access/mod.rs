@@ -1,9 +1,9 @@
 //! Who may ask the Context API what: the grants of `context_access.ron`,
 //! checked per request against the caller's `AppKey`.
 
+mod consent_dialog;
 mod first_use;
 mod parked;
-mod portal;
 mod redaction;
 
 use std::collections::HashMap;
@@ -13,9 +13,9 @@ use std::time::{Duration, Instant, SystemTime};
 use crownos_config::schema::{AppKey, ContextAccess, ContextDecision, Expiry, Scope, ScopeSet};
 use crownos_ipc::{Caller, PeerId, RemoteError};
 
+pub(crate) use consent_dialog::AccessAnswer;
 pub(crate) use first_use::{answer_parked, park_or_refuse};
 pub(crate) use parked::Parked;
-pub(crate) use portal::PortalAnswer;
 pub(crate) use redaction::redact_context;
 
 /// The grants, shared by the request handler and the event sender, and

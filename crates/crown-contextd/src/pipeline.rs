@@ -41,7 +41,7 @@ pub(crate) enum Outgoing {
     /// The user answered the first-use question for `key`, or nobody did.
     Answered {
         key: crownos_config::schema::AppKey,
-        answer: Option<crate::access::PortalAnswer>,
+        answer: Option<crate::access::AccessAnswer>,
     },
 }
 

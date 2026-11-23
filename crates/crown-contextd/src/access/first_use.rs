@@ -8,9 +8,9 @@ use crownos_config::schema::{AppKey, Scope, ScopeSet};
 use crownos_ipc::{Kind, RemoteError, Server};
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::consent_dialog::ask_api_access;
 use super::parked::Parking;
-use super::portal::ask_api_access;
-use super::{Grants, Parked, PortalAnswer};
+use super::{AccessAnswer, Grants, Parked};
 use crate::api::Api;
 use crate::pipeline::Outgoing;
 
@@ -66,7 +66,7 @@ pub(crate) fn answer_parked(
     api: &mut Api,
     parked: &mut Parked,
     key: &AppKey,
-    answer: Option<PortalAnswer>,
+    answer: Option<AccessAnswer>,
 ) {
     let scopes = answer.filter(|answer| answer.granted).map(|answer| {
         let metadata = ScopeSet::EMPTY.with(Scope::Metadata);

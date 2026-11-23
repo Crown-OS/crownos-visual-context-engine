@@ -17,6 +17,8 @@ const STARTUP: Duration = Duration::from_secs(30);
 /// No portal can be reached, so a first-use question fails at once instead
 /// of opening a dialog on the user's screen.
 const NO_SESSION_BUS: &str = "unix:path=/nonexistent/bus";
+/// No display either: the consent dialog cannot show, so nobody is asked.
+const NO_DISPLAY: &str = "/nonexistent/wayland-0";
 
 struct KilledOnDrop(Child);
 
@@ -71,6 +73,7 @@ fn a_caller_gets_its_grant_and_loses_the_connection_with_it() -> anyhow::Result<
             .env("CROWN_CONFIG_DIR", &config)
             .env("XDG_RUNTIME_DIR", &sockets)
             .env("DBUS_SESSION_BUS_ADDRESS", NO_SESSION_BUS)
+            .env("WAYLAND_DISPLAY", NO_DISPLAY)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?,
@@ -141,6 +144,7 @@ fn a_caller_without_a_grant_waits_for_the_question_and_gets_a_clear_refusal() ->
             .env("CROWN_CONFIG_DIR", &config)
             .env("XDG_RUNTIME_DIR", &sockets)
             .env("DBUS_SESSION_BUS_ADDRESS", NO_SESSION_BUS)
+            .env("WAYLAND_DISPLAY", NO_DISPLAY)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?,

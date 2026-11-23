@@ -13,6 +13,7 @@ use context_store::Store;
 
 const STARTUP: Duration = Duration::from_secs(30);
 const NO_SESSION_BUS: &str = "unix:path=/nonexistent/bus";
+const NO_DISPLAY: &str = "/nonexistent/wayland-0";
 
 struct KilledOnDrop(Child);
 
@@ -86,6 +87,7 @@ fn replayed_text_and_frames_reach_the_store() -> anyhow::Result<()> {
             .env("CROWN_CONFIG_DIR", &config)
             .env("XDG_RUNTIME_DIR", &sockets)
             .env("DBUS_SESSION_BUS_ADDRESS", NO_SESSION_BUS)
+            .env("WAYLAND_DISPLAY", NO_DISPLAY)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?,
