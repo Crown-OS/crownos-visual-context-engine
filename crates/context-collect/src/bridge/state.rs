@@ -36,6 +36,9 @@ pub(super) struct BridgeState {
     pub(super) link: CompositorLink,
     pub(super) initial_done: bool,
     closed: bool,
+    /// The scope the compositor granted, from version 2 on.
+    pub(super) scope: Option<u32>,
+    pub(super) revoked: bool,
 }
 
 impl std::fmt::Debug for BridgeState {
@@ -55,13 +58,15 @@ impl BridgeState {
         outlet: Outlet,
         link: CompositorLink,
     ) -> Result<Self, BridgeError> {
-        let manager: CrownosContextManagerV1 = globals.bind(handle, 1..=1, ())?;
+        let manager: CrownosContextManagerV1 = globals.bind(handle, 1..=2, ())?;
         Ok(Self {
             manager,
             outlet,
             link,
             initial_done: false,
             closed: false,
+            scope: None,
+            revoked: false,
         })
     }
 
@@ -77,6 +82,10 @@ impl BridgeState {
 
     pub(super) const fn outlet_closed(&self) -> bool {
         self.closed
+    }
+
+    pub(super) const fn is_revoked(&self) -> bool {
+        self.revoked
     }
 
     pub(super) fn ident_of(window: &CrownosContextWindowV1) -> Option<WindowIdent> {

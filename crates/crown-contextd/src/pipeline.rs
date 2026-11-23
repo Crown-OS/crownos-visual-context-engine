@@ -34,6 +34,13 @@ const IDLE_TICK: Duration = Duration::from_secs(5);
 pub(crate) enum Outgoing {
     Context(CurrentContext),
     Segment(SegmentView),
+    /// `context_access.ron` changed: callers whose grant is gone are dropped.
+    GrantsChanged,
+    /// The user answered the first-use question for `key`, or nobody did.
+    Answered {
+        key: crownos_config::schema::AppKey,
+        answer: Option<crate::access::PortalAnswer>,
+    },
 }
 
 pub(crate) struct Pipeline {

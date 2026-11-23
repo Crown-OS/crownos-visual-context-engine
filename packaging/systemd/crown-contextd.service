@@ -9,6 +9,8 @@ StartLimitIntervalSec=0
 Type=simple
 ExecStartPre=/bin/sh -c 'test -n "$WAYLAND_DISPLAY"'
 ExecStart=/usr/bin/crown-contextd
+# The compositor refuses the engine to a process that loads other code.
+UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH
 Restart=on-failure
 RestartSec=3
 RuntimeDirectory=crownos

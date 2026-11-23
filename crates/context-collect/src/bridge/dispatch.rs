@@ -142,6 +142,18 @@ impl Dispatch<CrownosContextManagerV1, ()> for BridgeState {
                 });
             }
             Event::Done => state.initial_done = true,
+            Event::Scope { scope } => {
+                let bits = match scope {
+                    WEnum::Value(scope) => scope.bits(),
+                    WEnum::Unknown(bits) => bits,
+                };
+                tracing::info!(scope = bits, "the compositor granted a context scope");
+                state.scope = Some(bits);
+            }
+            Event::Revoked { .. } => {
+                tracing::warn!("the compositor withdrew the context grant");
+                state.revoked = true;
+            }
             _ => {}
         }
     }

@@ -5,15 +5,17 @@ use std::time::Instant;
 
 use context_collect::BridgeHandle;
 use context_core::{Micros, Timestamp};
-use context_protocol::context::{ContextChanged, Handler, SegmentClosed};
+use context_protocol::context::{ContextChanged, PeerHandler, SegmentClosed};
 use context_protocol::{
     CurrentContext, EpisodeId, EpisodeView, Explanation, ForgetReport, ForgetRequest, Granularity,
     MemoryAssertion, MemoryKind, MemoryRef, Provenance, ResultKind, SearchHit, SearchQuery,
     SearchResults, SegmentView, SourceKind, Status, Timeline, TimelineQuery,
 };
 use context_store::{Store, Write, WriteHandle};
-use crownos_ipc::{RemoteError, Server};
+use crownos_config::schema::Scope;
+use crownos_ipc::{Caller, RemoteError, Server};
 
+use crate::access::{CallerScopes, Grants, redact_context};
 use crate::pipeline::Outgoing;
 use crate::shared::Shared;
 
@@ -24,6 +26,7 @@ pub(crate) struct Api {
     reader: Store,
     writes: WriteHandle,
     bridge: Option<BridgeHandle>,
+    grants: Grants,
 }
 
 impl Api {
@@ -32,13 +35,38 @@ impl Api {
         reader: Store,
         writes: WriteHandle,
         bridge: Option<BridgeHandle>,
+        grants: Grants,
     ) -> Self {
         Self {
             shared,
             reader,
             writes,
             bridge,
+            grants,
         }
+    }
+
+    /// The caller's scopes, after checking `scope`; a refusal is audited.
+    fn authorize(
+        &self,
+        caller: Caller<'_>,
+        action: &str,
+        scope: Option<Scope>,
+    ) -> Result<CallerScopes, RemoteError> {
+        let scopes = self.grants.of(caller);
+        let allowed = match scope {
+            Some(scope) => scopes.require(scope),
+            None => scopes.require_any(),
+        };
+        if let Err(error) = allowed {
+            self.audit(
+                &scopes.actor(),
+                "refused",
+                format!("{action}: {}", error.message),
+            );
+            return Err(error);
+        }
+        Ok(scopes)
     }
 
     fn shared(&self) -> Result<std::sync::MutexGuard<'_, Shared>, RemoteError> {
@@ -47,9 +75,9 @@ impl Api {
             .map_err(|_| RemoteError::new(RemoteError::HANDLER, "engine state poisoned"))
     }
 
-    fn audit(&self, action: &str, detail: String) {
+    fn audit(&self, actor: &str, action: &str, detail: String) {
         let _ = self.writes.send(Write::Audit {
-            actor: "api".to_owned(),
+            actor: actor.to_owned(),
             action: action.to_owned(),
             detail,
             t: Timestamp::now(),
@@ -64,18 +92,57 @@ fn store_error(error: &context_store::StoreError) -> RemoteError {
 /// The local offset is not known to the daemon yet; days begin at UTC midnight.
 const TZ_OFFSET: Micros = Micros::ZERO;
 
-pub(crate) fn send_event(server: &mut Server, outgoing: Outgoing) {
+/// Sends an event to the subscribers whose grant allows it, or drops the
+/// peers whose grant is gone.
+pub(crate) fn send_event(server: &mut Server, grants: &Grants, outgoing: Outgoing) {
     let sent = match outgoing {
-        Outgoing::Context(context) => server.emit(&ContextChanged { context }),
-        Outgoing::Segment(segment) => server.emit(&SegmentClosed { segment }),
+        Outgoing::Context(context) => {
+            grants.keep_keys_of(&server.peer_ids());
+            send_context(server, grants, &context)
+        }
+        Outgoing::Segment(segment) => server.emit_where(&SegmentClosed { segment }, |caller| {
+            grants.of(caller).scopes.contains(Scope::Text)
+        }),
+        Outgoing::Answered { .. } => Ok(()),
+        Outgoing::GrantsChanged => {
+            grants.keep_keys_of(&server.peer_ids());
+            let dropped = server.drop_peers_where(|caller| grants.of(caller).scopes.is_empty());
+            if !dropped.is_empty() {
+                tracing::info!(peers = dropped.len(), "dropped callers whose grant is gone");
+            }
+            Ok(())
+        }
     };
     if let Err(error) = sent {
         tracing::debug!(%error, "event not delivered");
     }
 }
 
-impl Handler for Api {
-    fn status(&mut self) -> Result<Status, RemoteError> {
+/// The full context to text callers, without titles to metadata callers.
+fn send_context(
+    server: &mut Server,
+    grants: &Grants,
+    context: &context_protocol::CurrentContext,
+) -> Result<(), crownos_ipc::Error> {
+    let full_scope = crownos_config::schema::ScopeSet::EMPTY
+        .with(Scope::Metadata)
+        .with(Scope::Text);
+    let metadata_scope = crownos_config::schema::ScopeSet::EMPTY.with(Scope::Metadata);
+    for (scope, wants) in [(full_scope, true), (metadata_scope, false)] {
+        let Some(context) = redact_context(context, scope) else {
+            continue;
+        };
+        server.emit_where(&ContextChanged { context }, |caller| {
+            let scopes = grants.of(caller).scopes;
+            scopes.contains(Scope::Metadata) && scopes.contains(Scope::Text) == wants
+        })?;
+    }
+    Ok(())
+}
+
+impl PeerHandler for Api {
+    fn status(&mut self, caller: Caller<'_>) -> Result<Status, RemoteError> {
+        self.authorize(caller, "status", None)?;
         let shared = self.shared()?;
         Ok(Status {
             state: shared.capture_state(),
@@ -88,11 +155,24 @@ impl Handler for Api {
         })
     }
 
-    fn current_context(&mut self) -> Result<CurrentContext, RemoteError> {
-        Ok(self.shared()?.engine.current_context(Timestamp::now()))
+    fn current_context(&mut self, caller: Caller<'_>) -> Result<CurrentContext, RemoteError> {
+        let scopes = self.authorize(caller, "current_context", Some(Scope::Metadata))?;
+        let context = self.shared()?.engine.current_context(Timestamp::now());
+        redact_context(&context, scopes.scopes)
+            .ok_or_else(|| RemoteError::new(RemoteError::UNAUTHORIZED, "no metadata scope"))
     }
 
-    fn search(&mut self, query: SearchQuery) -> Result<SearchResults, RemoteError> {
+    fn search(
+        &mut self,
+        caller: Caller<'_>,
+        query: SearchQuery,
+    ) -> Result<SearchResults, RemoteError> {
+        let raw_wanted = query.redaction == context_protocol::Redaction::Raw;
+        let needed = if raw_wanted { Scope::Raw } else { Scope::Text };
+        let scopes = self.authorize(caller, "search", Some(needed))?;
+        if raw_wanted {
+            scopes.require(Scope::Text)?;
+        }
         let started = Instant::now();
         let limit = query.limit.clamp(1, MAX_RESULTS);
         let range = query
@@ -165,14 +245,19 @@ impl Handler for Api {
                 break;
             }
         }
-        self.audit("search", format!("{} hits", hits.len()));
+        self.audit(&scopes.actor(), "search", format!("{} hits", hits.len()));
         Ok(SearchResults {
             hits,
             took_ms: u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
         })
     }
 
-    fn timeline(&mut self, query: TimelineQuery) -> Result<Timeline, RemoteError> {
+    fn timeline(
+        &mut self,
+        caller: Caller<'_>,
+        query: TimelineQuery,
+    ) -> Result<Timeline, RemoteError> {
+        self.authorize(caller, "timeline", Some(Scope::Text))?;
         let range = query.time.resolve(Timestamp::now(), TZ_OFFSET);
         let segments: Vec<SegmentView> = self
             .reader
@@ -206,7 +291,12 @@ impl Handler for Api {
         })
     }
 
-    fn episode(&mut self, id: EpisodeId) -> Result<Option<EpisodeView>, RemoteError> {
+    fn episode(
+        &mut self,
+        caller: Caller<'_>,
+        id: EpisodeId,
+    ) -> Result<Option<EpisodeView>, RemoteError> {
+        self.authorize(caller, "episode", Some(Scope::Text))?;
         let everything = context_core::TimeRange::new(Timestamp(0), Timestamp(i64::MAX));
         let Some(episode) = self
             .reader
@@ -230,7 +320,12 @@ impl Handler for Api {
         Ok(Some(EpisodeView::new(&episode, members)))
     }
 
-    fn explain(&mut self, memory: MemoryRef) -> Result<Explanation, RemoteError> {
+    fn explain(
+        &mut self,
+        caller: Caller<'_>,
+        memory: MemoryRef,
+    ) -> Result<Explanation, RemoteError> {
+        self.authorize(caller, "explain", Some(Scope::Text))?;
         let evidence = match memory.kind {
             MemoryKind::Segment => self
                 .reader
@@ -254,9 +349,15 @@ impl Handler for Api {
         })
     }
 
-    fn remember(&mut self, assertion: MemoryAssertion) -> Result<MemoryRef, RemoteError> {
+    fn remember(
+        &mut self,
+        caller: Caller<'_>,
+        assertion: MemoryAssertion,
+    ) -> Result<MemoryRef, RemoteError> {
+        let scopes = self.authorize(caller, "remember", Some(Scope::MemoryWrite))?;
         let now = Timestamp::now();
         self.audit(
+            &scopes.actor(),
             "remember",
             format!(
                 "{:?} {}={} by {:?}",
@@ -269,13 +370,19 @@ impl Handler for Api {
         })
     }
 
-    fn forget(&mut self, request: ForgetRequest) -> Result<ForgetReport, RemoteError> {
+    fn forget(
+        &mut self,
+        caller: Caller<'_>,
+        request: ForgetRequest,
+    ) -> Result<ForgetReport, RemoteError> {
+        let scopes = self.authorize(caller, "forget", Some(Scope::MemoryDelete))?;
         let range = request.time.resolve(Timestamp::now(), TZ_OFFSET);
         let outcome = self
             .writes
             .forget(range, request.app_key.clone())
             .map_err(|error| store_error(&error))?;
         self.audit(
+            &scopes.actor(),
             "forget",
             format!("{range:?} {:?}: {outcome:?}", request.app_key),
         );
@@ -288,7 +395,10 @@ impl Handler for Api {
         })
     }
 
-    fn pause(&mut self, seconds: u64) {
+    fn pause(&mut self, caller: Caller<'_>, seconds: u64) {
+        let Ok(scopes) = self.authorize(caller, "pause", Some(Scope::Pause)) else {
+            return;
+        };
         if let Ok(mut shared) = self.shared.lock() {
             shared.paused = true;
             shared.pause_reason = Some(if seconds == 0 {
@@ -305,10 +415,13 @@ impl Handler for Api {
             );
             shared.engine.ingest(&paused);
         }
-        self.audit("pause", seconds.to_string());
+        self.audit(&scopes.actor(), "pause", seconds.to_string());
     }
 
-    fn resume(&mut self) {
+    fn resume(&mut self, caller: Caller<'_>) {
+        let Ok(scopes) = self.authorize(caller, "resume", Some(Scope::Pause)) else {
+            return;
+        };
         if let Ok(mut shared) = self.shared.lock() {
             shared.paused = false;
             shared.pause_reason = None;
@@ -321,6 +434,6 @@ impl Handler for Api {
             );
             shared.engine.ingest(&resumed);
         }
-        self.audit("resume", String::new());
+        self.audit(&scopes.actor(), "resume", String::new());
     }
 }

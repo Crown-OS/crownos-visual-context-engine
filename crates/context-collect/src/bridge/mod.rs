@@ -41,6 +41,8 @@ pub enum BridgeError {
     Thread(#[from] std::io::Error),
     #[error(transparent)]
     ExposureRefused(#[from] ExposureRefused),
+    #[error("the compositor withdrew the grant of this engine")]
+    Revoked,
 }
 
 const RETRY: Duration = Duration::from_secs(3);
@@ -129,6 +131,9 @@ fn run_once(
     tracing::info!("bound crownos_context_manager_v1");
     while !stop.load(Ordering::Relaxed) {
         queue.blocking_dispatch(&mut state)?;
+        if state.is_revoked() {
+            return Err(BridgeError::Revoked);
+        }
         if state.outlet_closed() {
             break;
         }
