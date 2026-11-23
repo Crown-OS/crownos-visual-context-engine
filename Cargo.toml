@@ -10,6 +10,7 @@ members = [
     "crates/context-capture",
     "crates/context-infer",
     "crates/context-shm",
+    "crates/context-infer-ort",
     "crates/crown-contextd",
     "crates/crown-context",
     "eval",
