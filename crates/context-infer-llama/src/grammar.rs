@@ -2,8 +2,6 @@ use context_infer::{InferError, Output, Sampling};
 use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::sampling::LlamaSampler;
 
-use crate::util::error::backend_error;
-
 /// The sampler chain for `output`: a JSON-schema grammar first when there is one, then
 /// nucleus sampling, or greedy picks at temperature zero.
 pub(crate) fn sampler(
@@ -13,13 +11,14 @@ pub(crate) fn sampler(
 ) -> Result<LlamaSampler, InferError> {
     let mut chain = Vec::new();
     if let Output::Json(schema) = output {
-        let schema = serde_json::to_string(schema.as_ref())
-            .map_err(|error| InferError::Schema(error.to_string()))?;
+        let invalid = |error: String| InferError::InvalidInput(format!("the schema: {error}"));
+        let schema =
+            serde_json::to_string(schema.as_ref()).map_err(|error| invalid(error.to_string()))?;
         let grammar = llama_cpp_2::json_schema_to_grammar(&schema)
-            .map_err(|error| InferError::Schema(error.to_string()))?;
+            .map_err(|error| invalid(error.to_string()))?;
         chain.push(
             LlamaSampler::grammar(model, &grammar, "root")
-                .map_err(|error| backend_error("building the grammar", error))?,
+                .map_err(|error| invalid(error.to_string()))?,
         );
     }
     if sampling.temperature <= 0.0 {

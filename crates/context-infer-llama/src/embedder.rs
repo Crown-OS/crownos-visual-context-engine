@@ -16,8 +16,8 @@ const MAX_TOKENS: usize = 512;
 /// A GGUF embedding model; the pooling comes from the file.
 #[derive(Debug)]
 pub struct GgufEmbedder {
-    backend: Arc<LlamaBackend>,
     model: LlamaModel,
+    backend: Arc<LlamaBackend>,
     space: EmbedSpace,
     query_prefix: String,
     document_prefix: String,

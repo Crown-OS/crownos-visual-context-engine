@@ -30,10 +30,10 @@ const LAST_LOGITS: i32 = -1;
 /// A GGUF language model, with its vision projector when the registry names one.
 #[derive(Debug)]
 pub struct GgufGenerator {
-    backend: Arc<LlamaBackend>,
-    model: LlamaModel,
     projector: Option<Mutex<MtmdContext>>,
     template: LlamaChatTemplate,
+    model: LlamaModel,
+    backend: Arc<LlamaBackend>,
     context_tokens: u32,
 }
 
@@ -98,7 +98,7 @@ impl GgufGenerator {
                     message.content.to_string()
                 };
                 LlamaChatMessage::new(role.to_owned(), content)
-                    .map_err(|error| backend_error("building the chat", error))
+                    .map_err(|error| InferError::InvalidInput(format!("a chat message: {error}")))
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.model
@@ -157,7 +157,7 @@ impl GgufGenerator {
                 },
                 &bitmap_references,
             )
-            .map_err(|error| backend_error("tokenizing the prompt and images", error))?;
+            .map_err(|error| InferError::InvalidInput(format!("the prompt: {error}")))?;
         self.check_fits(chunks.total_tokens(), budget)?;
         chunks
             .eval_chunks(&mut projector, context, 0, 0, BATCH_TOKENS as i32, true)

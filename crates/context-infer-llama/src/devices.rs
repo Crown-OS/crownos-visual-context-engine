@@ -2,13 +2,15 @@ use context_infer::Device;
 use llama_cpp_2::{LlamaBackendDevice, LlamaBackendDeviceType, list_llama_ggml_backend_devices};
 
 /// The ggml device indices for `device`: the one with the most memory of that backend,
-/// discrete before integrated. Empty for the CPU, `None` when the backend has no device.
+/// discrete before integrated. Empty for the CPU; `None` when the backend module did not
+/// load or has no device.
 pub(crate) fn device_indices(device: Device) -> Option<Vec<usize>> {
+    let devices = list_llama_ggml_backend_devices();
     if device == Device::Cpu {
-        return Some(Vec::new());
+        return best_device(&devices, "CPU").map(|_| Vec::new());
     }
     let backend = ggml_backend_name(device)?;
-    best_device(&list_llama_ggml_backend_devices(), backend).map(|index| vec![index])
+    best_device(&devices, backend).map(|index| vec![index])
 }
 
 const fn ggml_backend_name(device: Device) -> Option<&'static str> {
