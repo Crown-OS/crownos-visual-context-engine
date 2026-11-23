@@ -6,7 +6,7 @@ use crownos_protocols::context::v1::client::crownos_context_window_v1::CrownosCo
 use wayland_client::globals::GlobalList;
 use wayland_client::{Proxy, QueueHandle};
 
-use super::{BridgeError, Outlet};
+use super::{BridgeError, CompositorLink, Outlet};
 use crate::window_table::WindowTable;
 
 /// What one `crownos_context_window_v1` has said so far, until its `done`.
@@ -33,7 +33,7 @@ impl WindowData {
 pub(super) struct BridgeState {
     pub(super) manager: CrownosContextManagerV1,
     pub(super) outlet: Outlet,
-    pub(super) windows: WindowTable,
+    pub(super) link: CompositorLink,
     pub(super) initial_done: bool,
     closed: bool,
 }
@@ -42,7 +42,7 @@ impl std::fmt::Debug for BridgeState {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("BridgeState")
-            .field("windows", &self.windows.len())
+            .field("windows", &self.link.with_windows(WindowTable::len))
             .field("initial_done", &self.initial_done)
             .finish_non_exhaustive()
     }
@@ -53,12 +53,13 @@ impl BridgeState {
         globals: &GlobalList,
         handle: &QueueHandle<Self>,
         outlet: Outlet,
+        link: CompositorLink,
     ) -> Result<Self, BridgeError> {
         let manager: CrownosContextManagerV1 = globals.bind(handle, 1..=1, ())?;
         Ok(Self {
             manager,
             outlet,
-            windows: WindowTable::default(),
+            link,
             initial_done: false,
             closed: false,
         })
@@ -93,8 +94,12 @@ impl BridgeState {
         if record.ident.0.is_empty() {
             return;
         }
-        let known = self.windows.get(&record.ident).is_some();
-        if !self.windows.upsert(record.clone()) {
+        self.link.remember_proxy(record.ident.clone(), window);
+        let (known, changed) = self.link.update_windows(|windows| {
+            let known = windows.get(&record.ident).is_some();
+            (known, windows.upsert(record.clone()))
+        });
+        if !changed {
             return;
         }
         self.emit(if known {
@@ -106,7 +111,8 @@ impl BridgeState {
 
     pub(super) fn window_closed(&mut self, window: &CrownosContextWindowV1) {
         if let Some(ident) = Self::ident_of(window) {
-            self.windows.remove(&ident);
+            self.link.update_windows(|windows| windows.remove(&ident));
+            self.link.forget_proxy(&ident);
             self.emit(ObservationKind::WindowClosed(ident));
         }
         window.destroy();

@@ -13,7 +13,7 @@ privacy, performance, API and the phased plan. This README is the map of the cod
 | `crates/context-core` | 1 | Observations, windows, segments, episodes, ids, time |
 | `crates/context-protocol` | 1 | The `crownos-visual-context` crownos-ipc contract |
 | `crates/context-policy` | 1 | `visual_context.ron`, the observe/metadata/drop gate, secret detectors |
-| `crates/context-collect` | 1 | The compositor bridge (`crownos_context_v1`), window table, app resolution |
+| `crates/context-collect` | 1 | The compositor bridge (`crownos_context_v1`), the AT-SPI text reader, window table, app resolution |
 | `crates/context-store` | 5 | SQLCipher store: events, segments, episodes, FTS5, forget with cascade |
 | `crates/context-engine` | 4 | Heartbeat merge, segmenter, correlator, classifier, working memory |
 | `crates/context-capture` | 2 | Capture scheduling and frame processing (not started) |

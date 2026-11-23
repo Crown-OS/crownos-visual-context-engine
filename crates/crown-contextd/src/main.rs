@@ -2,6 +2,7 @@
 //! observation through the policy, lets the engine segment it, persists what it should, and
 //! answers the Context API on crownos-ipc.
 
+mod accessibility_host;
 mod api;
 mod logging;
 mod pipeline;
@@ -14,13 +15,15 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use context_collect::{CompositorBridge, replay};
+use context_collect::a11y::{AccessibilityBus, AccessibilityCollector};
+use context_collect::{CompositorBridge, CompositorLink, replay};
 use context_eval::Trace;
 use context_policy::{Policy, VisualContext};
 use context_store::{Store, Writer};
 use crownos_ipc::ServiceBuilder;
 use crownos_ipc::adapter::tokio::serve_with_outbox;
 
+use crate::accessibility_host::ContextHost;
 use crate::shared::Shared;
 use crate::util::paths::state_dir;
 
@@ -60,6 +63,20 @@ async fn main() -> Result<()> {
 
     let (outlet, observations) = mpsc::sync_channel(OBSERVATION_QUEUE);
     let shared = Arc::new(Mutex::new(Shared::new(section.enabled)));
+    let link = CompositorLink::default();
+    let accessibility = if cli.replay.is_none() && section.enabled {
+        let host = ContextHost::new(
+            link.clone(),
+            Policy::from_section(&section).context("reading visual_context.ron")?,
+            Arc::clone(&shared),
+        );
+        Some(
+            AccessibilityCollector::spawn(outlet.clone(), host, AccessibilityBus::Session)
+                .context("starting the accessibility collector")?,
+        )
+    } else {
+        None
+    };
     let bridge = match &cli.replay {
         Some(path) => {
             let text = std::fs::read_to_string(path)
@@ -72,7 +89,10 @@ async fn main() -> Result<()> {
                 .spawn(move || replay(trace.observations, &outlet, speed))?;
             None
         }
-        None => Some(CompositorBridge::spawn(outlet).context("starting the compositor bridge")?),
+        None => Some(
+            CompositorBridge::spawn(outlet, link.clone())
+                .context("starting the compositor bridge")?,
+        ),
     };
 
     let (events, outbox) = tokio::sync::mpsc::unbounded_channel();
@@ -82,6 +102,7 @@ async fn main() -> Result<()> {
         writer.handle(),
         Arc::clone(&shared),
         events,
+        link,
     )?;
 
     let mut builder = ServiceBuilder::new(context_protocol::SERVICE);
@@ -104,6 +125,7 @@ async fn main() -> Result<()> {
         ) => served.context("the Context API stopped")?,
         _ = tokio::signal::ctrl_c() => tracing::info!("stopping"),
     }
+    drop(accessibility);
     drop(handler);
     pipeline.stop();
     drop(writer);

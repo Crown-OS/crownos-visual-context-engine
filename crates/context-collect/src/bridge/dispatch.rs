@@ -48,7 +48,7 @@ impl Dispatch<CrownosContextManagerV1, ()> for BridgeState {
             }
             Event::Focus { window, .. } => {
                 let ident = window.as_ref().and_then(BridgeState::ident_of);
-                state.windows.set_focus(ident.clone());
+                state.link.set_focus(ident.clone());
                 state.emit(ObservationKind::Focus(ident));
             }
             Event::Session { state: session } => {
@@ -61,6 +61,7 @@ impl Dispatch<CrownosContextManagerV1, ()> for BridgeState {
                     }
                     _ => SessionState::Active,
                 };
+                state.link.set_locked(session == SessionState::Locked);
                 state.emit(ObservationKind::Session(session));
             }
             Event::InputActivity {
@@ -134,6 +135,7 @@ impl Dispatch<CrownosContextManagerV1, ()> for BridgeState {
                     }
                     _ => PauseOrigin::Hotkey,
                 };
+                state.link.set_paused(paused != 0);
                 state.emit(ObservationKind::Paused {
                     paused: paused != 0,
                     origin,

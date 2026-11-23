@@ -7,10 +7,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use context_collect::CompositorLink;
 use context_collect::apps::AppResolver;
 use context_core::{Observation, ObservationKind, Timestamp, WindowRecord};
 use context_engine::{EngineEvent, SegmentEvent};
-use context_policy::Policy;
+use context_policy::{Policy, find_secrets};
 use context_protocol::{CurrentContext, SegmentView};
 use context_store::{Write, WriteHandle};
 use tokio::sync::mpsc::UnboundedSender;
@@ -49,6 +50,7 @@ pub(crate) fn spawn(
     writes: WriteHandle,
     shared: Arc<Mutex<Shared>>,
     events: UnboundedSender<Outgoing>,
+    link: CompositorLink,
 ) -> Result<Pipeline> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread = std::thread::Builder::new()
@@ -61,6 +63,7 @@ pub(crate) fn spawn(
                     writes,
                     shared,
                     events,
+                    link,
                     apps: AppResolver::default(),
                     last_context: None,
                     pending_context: None,
@@ -80,6 +83,7 @@ struct Worker {
     writes: WriteHandle,
     shared: Arc<Mutex<Shared>>,
     events: UnboundedSender<Outgoing>,
+    link: CompositorLink,
     apps: AppResolver,
     last_context: Option<Instant>,
     pending_context: Option<CurrentContext>,
@@ -156,19 +160,26 @@ impl Worker {
     }
 
     /// The policy's say: whole observations dropped for excluded windows, text stripped for
-    /// sensitive ones.
+    /// sensitive ones, and text with a secret in it dropped while its window is flagged.
     fn admit(&self, shared: &Shared, observation: Observation) -> Option<Observation> {
         let verdict = |record: &WindowRecord| self.policy.judge(record);
         match &observation.kind {
             ObservationKind::WindowOpened(record) | ObservationKind::WindowChanged(record) => {
                 verdict(record).allows_metadata().then_some(observation)
             }
-            ObservationKind::Text { window, .. } => {
+            ObservationKind::Text { window, lines, .. } => {
                 let allowed = shared
                     .engine
                     .window(window)
                     .is_some_and(|record| verdict(record).allows_text());
-                allowed.then_some(observation)
+                if !allowed {
+                    return None;
+                }
+                if lines.iter().any(|line| !find_secrets(line).is_empty()) {
+                    self.link.flag_sensitive(window);
+                    return None;
+                }
+                Some(observation)
             }
             ObservationKind::Focus(Some(window))
             | ObservationKind::InputActivity {
