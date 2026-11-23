@@ -183,7 +183,10 @@ impl Embed for OnnxEmbedder {
                     "the encoder gives {shape:?}, not {dimensions} wide"
                 ))
             })?;
-        let mut values = Vec::with_capacity(batch.rows * dimensions);
+        let mut embeddings = Embeddings {
+            dimensions,
+            values: Vec::with_capacity(batch.rows * dimensions),
+        };
         for row in 0..batch.rows {
             let vector = if pooled_output {
                 states
@@ -201,9 +204,9 @@ impl Embed for OnnxEmbedder {
                     self.pooling,
                 )
             };
-            values.extend(truncate_and_normalize(&vector, dimensions));
+            embeddings.push_normalized(&vector);
         }
-        Ok(Embeddings { dimensions, values })
+        Ok(embeddings)
     }
 }
 
@@ -231,18 +234,6 @@ fn pool(states: &[f32], mask: &[i64], width: usize, pooling: Pooling) -> Vec<f32
     }
 }
 
-/// The first `dimensions` values, scaled to unit length.
-fn truncate_and_normalize(vector: &[f32], dimensions: usize) -> Vec<f32> {
-    let truncated = vector.get(..dimensions).unwrap_or(vector);
-    let length = truncated
-        .iter()
-        .map(|value| value * value)
-        .sum::<f32>()
-        .sqrt();
-    let scale = if length > 0.0 { 1.0 / length } else { 0.0 };
-    truncated.iter().map(|value| value * scale).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,11 +246,5 @@ mod tests {
         assert_eq!(pool(&STATES, &mask, 2, Pooling::Cls), [1.0, 0.0]);
         assert_eq!(pool(&STATES, &mask, 2, Pooling::LastToken), [3.0, 4.0]);
         assert_eq!(pool(&STATES, &mask, 2, Pooling::Mean), [2.0, 2.0]);
-    }
-
-    #[test]
-    fn matryoshka_cut_then_unit_length() {
-        assert_eq!(truncate_and_normalize(&[3.0, 4.0, 12.0], 2), [0.6, 0.8]);
-        assert_eq!(truncate_and_normalize(&[0.0, 0.0], 2), [0.0, 0.0]);
     }
 }

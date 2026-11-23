@@ -51,6 +51,20 @@ impl Embeddings {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Adds the first `dimensions` values of `vector` (a Matryoshka cut), scaled to unit
+    /// length.
+    pub fn push_normalized(&mut self, vector: &[f32]) {
+        let truncated = vector.get(..self.dimensions).unwrap_or(vector);
+        let length = truncated
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        let scale = if length > 0.0 { 1.0 / length } else { 0.0 };
+        self.values
+            .extend(truncated.iter().map(|value| value * scale));
+    }
 }
 
 pub trait Embed: Send + Sync {
@@ -59,4 +73,20 @@ pub trait Embed: Send + Sync {
 
     /// One normalised vector per text, in input order.
     fn embed(&self, texts: &[String], purpose: EmbedPurpose) -> Result<Embeddings, InferError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pushed_vector_is_cut_and_has_unit_length() {
+        let mut embeddings = Embeddings {
+            dimensions: 2,
+            values: Vec::new(),
+        };
+        embeddings.push_normalized(&[3.0, 4.0, 12.0]);
+        embeddings.push_normalized(&[0.0, 0.0]);
+        assert_eq!(embeddings.values, [0.6, 0.8, 0.0, 0.0]);
+    }
 }

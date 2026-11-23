@@ -11,6 +11,7 @@ members = [
     "crates/context-infer",
     "crates/context-shm",
     "crates/context-infer-ort",
+    "crates/context-infer-llama",
     "crates/crown-contextd",
     "crates/crown-context",
     "eval",
