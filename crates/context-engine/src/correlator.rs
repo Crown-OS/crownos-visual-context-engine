@@ -71,6 +71,7 @@ impl Correlator {
             ObservationKind::Selection {
                 kind: SelectionKind::Clipboard,
                 window,
+                secret: false,
                 ..
             } => {
                 self.copies.push_back(Copy {
@@ -152,6 +153,27 @@ mod tests {
         assert_eq!(correlator.copy_source(Timestamp::from_secs(20)), Some(&w));
         correlator.observe(&at(700, ObservationKind::Focus(None)));
         assert_eq!(correlator.copy_source(Timestamp::from_secs(800)), None);
+    }
+
+    #[test]
+    fn a_secret_copy_is_neither_captured_nor_remembered() {
+        let mut correlator = Correlator::default();
+        let dues = correlator.observe(&at(
+            10,
+            ObservationKind::Selection {
+                kind: SelectionKind::Clipboard,
+                window: Some(WindowIdent("vault".into())),
+                mime_types: vec!["text/plain".into()],
+                size_hint: 32,
+                secret: true,
+            },
+        ));
+        assert!(dues.is_empty());
+        assert_eq!(correlator.copy_source(Timestamp::from_secs(20)), None);
+        assert_eq!(
+            correlator.copies_between(Timestamp::from_secs(0), Timestamp::from_secs(20)),
+            0
+        );
     }
 
     #[test]

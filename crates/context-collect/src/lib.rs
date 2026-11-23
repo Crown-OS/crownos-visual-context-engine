@@ -8,8 +8,11 @@
 pub mod apps;
 mod bridge;
 mod replay;
+mod util;
 mod window_table;
 
-pub use bridge::{BridgeError, BridgeHandle, CompositorBridge, Outlet};
+pub use bridge::{
+    BridgeError, BridgeHandle, BridgeLink, CompositorBridge, ExposureHook, Outlet, SensitiveReason,
+};
 pub use replay::replay;
 pub use window_table::WindowTable;

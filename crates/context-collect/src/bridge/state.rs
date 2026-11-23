@@ -6,7 +6,7 @@ use crownos_protocols::context::v1::client::crownos_context_window_v1::CrownosCo
 use wayland_client::globals::GlobalList;
 use wayland_client::{Proxy, QueueHandle};
 
-use super::{BridgeError, Outlet};
+use super::{BridgeError, BridgeLink, Outlet};
 use crate::window_table::WindowTable;
 
 /// What one `crownos_context_window_v1` has said so far, until its `done`.
@@ -34,6 +34,7 @@ pub(super) struct BridgeState {
     pub(super) manager: CrownosContextManagerV1,
     pub(super) outlet: Outlet,
     pub(super) windows: WindowTable,
+    link: BridgeLink,
     pub(super) initial_done: bool,
     closed: bool,
 }
@@ -53,12 +54,14 @@ impl BridgeState {
         globals: &GlobalList,
         handle: &QueueHandle<Self>,
         outlet: Outlet,
+        link: BridgeLink,
     ) -> Result<Self, BridgeError> {
         let manager: CrownosContextManagerV1 = globals.bind(handle, 1..=1, ())?;
         Ok(Self {
             manager,
             outlet,
             windows: WindowTable::default(),
+            link,
             initial_done: false,
             closed: false,
         })
@@ -94,6 +97,10 @@ impl BridgeState {
             return;
         }
         let known = self.windows.get(&record.ident).is_some();
+        if !known {
+            self.link
+                .window_described(record.ident.clone(), window.clone());
+        }
         if !self.windows.upsert(record.clone()) {
             return;
         }
@@ -106,6 +113,7 @@ impl BridgeState {
 
     pub(super) fn window_closed(&mut self, window: &CrownosContextWindowV1) {
         if let Some(ident) = Self::ident_of(window) {
+            self.link.window_closed(&ident);
             self.windows.remove(&ident);
             self.emit(ObservationKind::WindowClosed(ident));
         }

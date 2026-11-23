@@ -12,8 +12,8 @@ pub use ids::{
     EntityId, EpisodeId, EventId, FactId, FrameId, MemoryKind, MemoryRef, ProjectId, SegmentId,
 };
 pub use observation::{
-    InputCounts, Observation, ObservationKind, PauseOrigin, SelectionKind, SessionState,
-    TextSource, Trigger,
+    FrameRecord, InputCounts, Observation, ObservationKind, PauseOrigin, SelectionKind,
+    SessionState, TextSource, Trigger,
 };
 pub use segment::{
     ActivityLabel, DocKey, Episode, EpisodeLevel, InputProfile, Segment, SegmentState,

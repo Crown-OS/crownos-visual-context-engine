@@ -16,18 +16,30 @@ context-core = { workspace = true }
 context-protocol = { workspace = true }
 context-policy = { workspace = true }
 context-collect = { workspace = true }
+context-capture = { workspace = true }
+context-infer-client = { workspace = true }
 context-store = { workspace = true }
 context-engine = { workspace = true }
 context-eval = { workspace = true }
 crownos-ipc = { workspace = true, features = ["tokio"] }
 crownos-config = { workspace = true }
 anyhow = { workspace = true }
+futures-util = { workspace = true }
+rustix = { workspace = true, features = ["process"] }
+zbus = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-journald = { workspace = true }
+
+[dev-dependencies]
+context-shm = { workspace = true }
+proptest = { workspace = true }
+rusqlite = { workspace = true }
+wayland-client = { workspace = true }
+wayland-protocols = { workspace = true }
 
 [lints]
 workspace = true

@@ -29,6 +29,12 @@ CPUWeight=20
 IOWeight=20
 MemoryHigh=256M
 Nice=10
+LimitCORE=0
+# Frames are not swapped: contextd faults each frame in at allocation, so its pages count
+# against this cgroup, where swap is off. LimitMEMLOCK is not set: a user unit cannot raise it
+# above the user manager's limit (8 MiB), so mlock stays best effort.
+MemorySwapMax=0
+MemoryZSwapMax=0
 
 [Install]
 WantedBy=default.target

@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use context_core::{Episode, Observation, Segment, SegmentId, TimeRange, Timestamp};
+use context_core::{Episode, FrameRecord, Observation, Segment, SegmentId, TimeRange, Timestamp};
 
 use crate::queries::{self, ForgetOutcome, TextLine};
 use crate::store::{Store, StoreError};
@@ -32,6 +32,12 @@ pub enum Write {
     TextLines {
         segment: SegmentId,
         lines: Vec<TextLine>,
+    },
+    /// The metadata of one analysed capture. It has no pixel and no path.
+    Frame {
+        segment: SegmentId,
+        frame: FrameRecord,
+        t: Timestamp,
     },
     WorkingMemory {
         snapshot: Vec<u8>,
@@ -196,6 +202,9 @@ fn apply(
             Write::Episode(episode) => queries::upsert_episode(&transaction, &episode)?,
             Write::TextLines { segment, lines } => {
                 queries::insert_text_lines(&transaction, segment, &lines)?;
+            }
+            Write::Frame { segment, frame, t } => {
+                queries::insert_frame(&transaction, segment, &frame, t)?;
             }
             Write::WorkingMemory { snapshot, t } => {
                 queries::save_working_memory(&transaction, &snapshot, t)?;

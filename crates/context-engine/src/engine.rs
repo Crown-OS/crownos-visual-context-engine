@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use context_core::{
-    AppRef, Observation, ObservationKind, Segment, SessionState, Timestamp, WindowIdent,
+    AppRef, Observation, ObservationKind, Segment, SegmentId, SessionState, Timestamp, WindowIdent,
     WindowRecord,
 };
 use context_protocol::CurrentContext;
@@ -79,6 +79,13 @@ impl Engine {
 
     pub fn window(&self, ident: &WindowIdent) -> Option<&WindowRecord> {
         self.windows.get(ident)
+    }
+
+    /// The open segment, when it is about `window`.
+    pub fn open_segment_of(&self, window: &WindowIdent) -> Option<SegmentId> {
+        (self.segmenter.open_window() == Some(window))
+            .then(|| self.segmenter.open_segment().map(|segment| segment.id))
+            .flatten()
     }
 
     pub const fn is_observing(&self) -> bool {
@@ -243,7 +250,7 @@ impl Engine {
         events
     }
 
-    fn app_of(&self, window: &WindowIdent) -> Option<AppRef> {
+    pub fn app_of(&self, window: &WindowIdent) -> Option<AppRef> {
         self.apps.get(window).cloned().or_else(|| {
             self.windows.get(window).map(|record| AppRef {
                 app_key: record.app_id.to_ascii_lowercase(),

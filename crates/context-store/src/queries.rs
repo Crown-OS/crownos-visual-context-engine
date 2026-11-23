@@ -2,8 +2,8 @@
 //! share them.
 
 use context_core::{
-    ActivityLabel, DocKey, Episode, EpisodeId, EpisodeLevel, InputProfile, Observation, Segment,
-    SegmentId, SegmentState, TextSource, TimeRange, Timestamp,
+    ActivityLabel, DocKey, Episode, EpisodeId, EpisodeLevel, FrameRecord, InputProfile,
+    Observation, Segment, SegmentId, SegmentState, TextSource, TimeRange, Timestamp, Trigger,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
@@ -109,6 +109,7 @@ const fn kind_name(observation: &Observation) -> &'static str {
         Paused { .. } => "paused",
         Text { .. } => "text",
         Notification { .. } => "notification",
+        Frame(_) => "frame",
     }
 }
 
@@ -391,6 +392,42 @@ pub(crate) fn insert_text_lines(
         ])? as u64;
     }
     Ok(inserted)
+}
+
+/// One row of frame metadata. The frame itself was deleted at capture time.
+pub(crate) fn insert_frame(
+    connection: &Connection,
+    segment: SegmentId,
+    frame: &FrameRecord,
+    t: Timestamp,
+) -> Result<i64, StoreError> {
+    connection
+        .prepare_cached(
+            "INSERT INTO frames(segment_id, t, trigger, width, height, damage_ratio, line_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?
+        .execute(params![
+            segment.0 as i64,
+            t.0,
+            trigger_name(frame.trigger),
+            frame.width,
+            frame.height,
+            f64::from(frame.damage_permille) / 1000.0,
+            frame.line_count,
+        ])?;
+    Ok(connection.last_insert_rowid())
+}
+
+const fn trigger_name(trigger: Trigger) -> &'static str {
+    match trigger {
+        Trigger::FocusChange => "focus_change",
+        Trigger::TitleChange => "title_change",
+        Trigger::TypingPause => "typing_pause",
+        Trigger::ScrollStop => "scroll_stop",
+        Trigger::Copy => "copy",
+        Trigger::DamageSettled => "damage_settled",
+        Trigger::IdleBackstop => "idle_backstop",
+    }
 }
 
 const fn source_name(source: TextSource) -> &'static str {

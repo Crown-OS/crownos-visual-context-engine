@@ -95,6 +95,22 @@ pub enum ObservationKind {
         app_id: String,
         category: String,
     },
+    /// A capture was analysed and its pixels deleted.
+    Frame(FrameRecord),
+}
+
+/// What is kept of one capture: numbers only, never an image or a path to one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameRecord {
+    pub window: WindowIdent,
+    pub trigger: Trigger,
+    pub width: u32,
+    pub height: u32,
+    /// The share of the window the compositor reported as changed, in thousandths.
+    pub damage_permille: u16,
+    pub line_count: u32,
+    /// A secret was on screen; the text of this capture was dropped.
+    pub secret_seen: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,9 +130,9 @@ impl Observation {
             ObservationKind::WindowOpened(record) | ObservationKind::WindowChanged(record) => {
                 Some(&record.ident)
             }
-            ObservationKind::WindowClosed(ident) | ObservationKind::Text { window: ident, .. } => {
-                Some(ident)
-            }
+            ObservationKind::WindowClosed(ident)
+            | ObservationKind::Text { window: ident, .. }
+            | ObservationKind::Frame(FrameRecord { window: ident, .. }) => Some(ident),
             ObservationKind::Focus(window)
             | ObservationKind::InputActivity { window, .. }
             | ObservationKind::Selection { window, .. } => window.as_ref(),
