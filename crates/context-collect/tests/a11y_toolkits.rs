@@ -1,7 +1,13 @@
-//! Reads real GTK 4 and Qt windows over a private a11y bus. Run inside a nested crownpositor:
+//! Reads real GTK 4 and Qt windows over a private a11y bus. The probes need a nested
+//! crownpositor. Start it in a private, short runtime directory: in the user's own directory it
+//! replaces the live compositor's control socket `crownos/crownpositor.sock`.
 //!
 //! ```sh
-//! WAYLAND_DISPLAY=<nested socket> cargo test -p context-collect --test a11y_toolkits -- --ignored
+//! runtime=/tmp/vcge-nested; mkdir -p $runtime
+//! XDG_RUNTIME_DIR=$runtime WAYLAND_DISPLAY=$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY \
+//!     CROWN_CONFIG_DIR=$(mktemp -d) target/debug/compositor &   # save $! and kill only that
+//! WAYLAND_DISPLAY=$runtime/wayland-1 \
+//!     cargo test -p context-collect --test a11y_toolkits -- --ignored --test-threads=1
 //! ```
 
 #![allow(
@@ -69,7 +75,9 @@ async fn gtk4_is_walked_once_then_read_from_its_cache() {
     let a11y = session.enable_accessibility().await;
     let probe = session.launch(
         "python3",
-        &["-c", GTK4_PROBE, GTK4_TITLE, LABEL_TEXT, BODY_TEXT, "0"],
+        &[
+            "-c", GTK4_PROBE, GTK4_TITLE, LABEL_TEXT, BODY_TEXT, "0", "0",
+        ],
         &[("GDK_BACKEND", "wayland")],
     );
     let connection = a11y_connection(&a11y).await;
@@ -96,7 +104,9 @@ async fn a_password_field_stops_the_read() {
     let a11y = session.enable_accessibility().await;
     let probe = session.launch(
         "python3",
-        &["-c", GTK4_PROBE, GTK4_TITLE, LABEL_TEXT, BODY_TEXT, "1"],
+        &[
+            "-c", GTK4_PROBE, GTK4_TITLE, LABEL_TEXT, BODY_TEXT, "1", "0",
+        ],
         &[("GDK_BACKEND", "wayland")],
     );
     let connection = a11y_connection(&a11y).await;
@@ -107,7 +117,7 @@ async fn a_password_field_stops_the_read() {
 
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "needs a nested crownpositor, dbus-daemon, at-spi2-core and PySide6"]
-async fn qt_is_read() {
+async fn qt_is_read_through_collection_matches() {
     let session = PrivateSession::start();
     let a11y = session.enable_accessibility().await;
     let probe = session.launch(
@@ -120,7 +130,7 @@ async fn qt_is_read() {
     let reading = read_until_titled(&connection, &bus_name, QT_TITLE).await;
     assert_eq!(reading.toolkit, Toolkit::Qt);
     let (lines, strategy) = text_of(&reading);
-    eprintln!("Qt was read with {strategy:?}");
+    assert_eq!(strategy, FetchStrategy::CollectionMatches);
     assert_probe_text(lines);
 }
 
@@ -147,37 +157,22 @@ impl AccessibilityHost for FakeHost {
     fn flag_sensitive(&self, _: &WindowIdent) {}
 }
 
-#[tokio::test(flavor = "current_thread")]
-#[ignore = "needs a nested crownpositor, dbus-daemon, at-spi2-core and python-gobject with GTK 4"]
-async fn the_collector_sends_the_focused_window_text() {
-    let session = PrivateSession::start();
-    let a11y = session.enable_accessibility().await;
-    let probe = session.launch(
-        "python3",
-        &["-c", GTK4_PROBE, GTK4_TITLE, LABEL_TEXT, BODY_TEXT, "0"],
-        &[("GDK_BACKEND", "wayland")],
-    );
-    let connection = a11y_connection(&a11y).await;
-    let bus_name = application_of(&connection, probe.pid()).await;
-    read_until_titled(&connection, &bus_name, GTK4_TITLE).await;
-
+fn probe_window(pid: u32) -> (WindowIdent, WindowTable) {
     let ident = WindowIdent("probe".into());
     let mut windows = WindowTable::default();
     windows.upsert(WindowRecord {
         ident: ident.clone(),
         app_id: "org.crownos.VcgeProbeGtk4".into(),
         title: GTK4_TITLE.into(),
-        pid: i32::try_from(probe.pid()).unwrap(),
+        pid: i32::try_from(pid).unwrap(),
         ..WindowRecord::default()
     });
-    windows.set_focus(Some(ident.clone()));
-    let host = FakeHost {
-        windows,
-        focus: watch::Sender::new(Some(ident.clone())),
-    };
-    let (outlet, observations) = mpsc::sync_channel(16);
-    let _collector =
-        AccessibilityCollector::spawn(outlet, host, AccessibilityBus::Address(a11y)).unwrap();
+    (ident, windows)
+}
+
+async fn first_text(
+    observations: mpsc::Receiver<context_core::Observation>,
+) -> (WindowIdent, Vec<String>) {
     let observation =
         tokio::task::spawn_blocking(move || observations.recv_timeout(Duration::from_secs(10)))
             .await
@@ -192,7 +187,62 @@ async fn the_collector_sends_the_focused_window_text() {
     else {
         panic!("expected text, got {:?}", observation.kind);
     };
-    assert_eq!(window, ident);
     assert_eq!(source, TextSource::Accessibility);
+    (window, lines)
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "needs a nested crownpositor, dbus-daemon, at-spi2-core and python-gobject with GTK 4"]
+async fn the_collector_reads_the_window_the_compositor_focuses() {
+    let session = PrivateSession::start();
+    let a11y = session.enable_accessibility().await;
+    let probe = session.launch(
+        "python3",
+        &[
+            "-c", GTK4_PROBE, GTK4_TITLE, LABEL_TEXT, BODY_TEXT, "0", "0",
+        ],
+        &[("GDK_BACKEND", "wayland")],
+    );
+    let connection = a11y_connection(&a11y).await;
+    let bus_name = application_of(&connection, probe.pid()).await;
+    read_until_titled(&connection, &bus_name, GTK4_TITLE).await;
+    let (ident, mut windows) = probe_window(probe.pid());
+    windows.set_focus(Some(ident.clone()));
+    let host = FakeHost {
+        windows,
+        focus: watch::Sender::new(Some(ident.clone())),
+    };
+    let (outlet, observations) = mpsc::sync_channel(16);
+    let _collector =
+        AccessibilityCollector::spawn(outlet, host, AccessibilityBus::Address(a11y)).unwrap();
+    let (window, lines) = first_text(observations).await;
+    assert_eq!(window, ident);
+    assert_probe_text(&lines);
+}
+
+/// No compositor focus at all: only the AT-SPI focus event, through the registry, the match
+/// rules and the signal parser, can start this read.
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "needs a nested crownpositor, dbus-daemon, at-spi2-core and python-gobject with GTK 4"]
+async fn an_accessibility_focus_event_starts_a_read() {
+    let session = PrivateSession::start();
+    let a11y = session.enable_accessibility().await;
+    let probe = session.launch(
+        "python3",
+        &[
+            "-c", GTK4_PROBE, GTK4_TITLE, LABEL_TEXT, BODY_TEXT, "0", "1",
+        ],
+        &[("GDK_BACKEND", "wayland")],
+    );
+    let (ident, windows) = probe_window(probe.pid());
+    let host = FakeHost {
+        windows,
+        focus: watch::Sender::new(None),
+    };
+    let (outlet, observations) = mpsc::sync_channel(16);
+    let _collector =
+        AccessibilityCollector::spawn(outlet, host, AccessibilityBus::Address(a11y)).unwrap();
+    let (window, lines) = first_text(observations).await;
+    assert_eq!(window, ident);
     assert_probe_text(&lines);
 }

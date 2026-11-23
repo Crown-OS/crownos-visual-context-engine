@@ -1,4 +1,6 @@
-use atspi::{MatchType, ObjectMatchRule, ObjectRefOwned, State, StateSet};
+use std::collections::HashMap;
+
+use atspi::{Interface, MatchType, ObjectMatchRule, ObjectRefOwned, State, StateSet};
 
 use super::{NODE_BUDGET, Structure, gather_until};
 use crate::a11y::node::NodeFacts;
@@ -6,9 +8,9 @@ use crate::a11y::reader::{ReadError, Reader};
 use crate::a11y::toolkit::FetchStrategy;
 
 /// One `GetMatches` for every shown node of the window, in canonical order, then role and name
-/// for each of them in parallel. A window always shows something, so an empty answer means the
-/// toolkit does not really match (Qt 6.12 answers every rule with nothing): `None`, and the
-/// caller walks instead.
+/// for each of them in parallel. Every criterion has a match type: Qt treats an invalid one as
+/// "match nothing", and an empty set under `All` matches everything. A window always shows
+/// something, so an empty answer gives `None` and the caller walks instead.
 pub(super) async fn fetch(
     reader: &Reader<'_>,
     frame: &ObjectRefOwned,
@@ -16,6 +18,9 @@ pub(super) async fn fetch(
     let shown = [State::Showing, State::Visible];
     let rule = ObjectMatchRule::builder()
         .states(shown, MatchType::All)
+        .attributes(HashMap::new(), MatchType::All)
+        .roles(&[], MatchType::All)
+        .interfaces(std::iter::empty::<Interface>(), MatchType::All)
         .build();
     let objects = reader.matches(frame, rule, NODE_BUDGET).await?;
     if objects.is_empty() {

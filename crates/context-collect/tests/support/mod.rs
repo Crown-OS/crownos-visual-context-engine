@@ -23,8 +23,8 @@ pub const BODY_TEXT: &str = "Probe body text that only the text view holds";
 pub const GTK4_PROBE: &str = r#"
 import sys, gi
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk
-title, label, body, password = sys.argv[1:5]
+from gi.repository import GLib, Gtk
+title, label, body, password, refocus = sys.argv[1:6]
 def build(app):
     window = Gtk.ApplicationWindow(application=app, title=title)
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -34,8 +34,12 @@ def build(app):
     box.append(view)
     if password == "1":
         box.append(Gtk.PasswordEntry())
+    entry = Gtk.Entry()
+    box.append(entry)
     window.set_child(box)
     window.present()
+    if refocus == "1":
+        GLib.timeout_add(3000, lambda: entry.grab_focus() and False)
 app = Gtk.Application(application_id="org.crownos.VcgeProbeGtk4")
 app.connect("activate", build)
 app.run([])
