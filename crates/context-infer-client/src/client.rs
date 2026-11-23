@@ -118,7 +118,11 @@ impl InferdClient {
                     return None;
                 }
             };
-            Some(Box::new(move |client: &mut Client| {
+            Some(Box::new(move |client: Option<&mut Client>| {
+                let Some(client) = client else {
+                    let _ = answer.send(Err(crownos_ipc::Error::Disconnected));
+                    return true;
+                };
                 match client.take(&pending) {
                     Ok(None) => return false,
                     Ok(Some(reply)) => {

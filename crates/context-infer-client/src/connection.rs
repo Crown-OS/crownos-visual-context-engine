@@ -2,7 +2,7 @@
 //! jobs and their cancels go out on it together. A lost connection is made again.
 
 use std::os::fd::AsFd;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use context_infer::InferError;
@@ -16,8 +16,9 @@ const RECONNECT_AFTER: Duration = Duration::from_secs(3);
 
 /// Makes the connection; called once at the start and again after the connection is lost.
 pub(crate) type Connector = Box<dyn FnMut() -> Result<Client, InferError> + Send>;
-/// Takes a request's reply once it came. Returns `true` when the request is finished.
-pub(crate) type Poller = Box<dyn FnMut(&mut Client) -> bool + Send>;
+/// Takes a request's reply once it came, or reports the lost connection when it gets `None`.
+/// Returns `true` when the request is finished.
+pub(crate) type Poller = Box<dyn FnMut(Option<&mut Client>) -> bool + Send>;
 /// Sends a request on the connection, or reports that there is none.
 pub(crate) type Begin = Box<dyn FnOnce(Option<&mut Client>) -> Option<Poller> + Send>;
 
@@ -57,15 +58,24 @@ fn serve(mut client: Option<Client>, mut connector: Connector, commands: &Receiv
     let mut pollers: Vec<Poller> = Vec::new();
     let mut last_attempt = Instant::now();
     loop {
-        let wait = if client.is_some() {
-            Duration::ZERO
+        let first = if !pollers.is_empty() {
+            match commands.try_recv() {
+                Ok(command) => Some(command),
+                Err(TryRecvError::Empty) => None,
+                Err(TryRecvError::Disconnected) => return,
+            }
+        } else if client.is_some() {
+            match commands.recv() {
+                Ok(command) => Some(command),
+                Err(_) => return,
+            }
         } else {
-            RECONNECT_AFTER.saturating_sub(last_attempt.elapsed())
-        };
-        let first = match commands.recv_timeout(wait.max(Duration::from_millis(1))) {
-            Ok(command) => Some(command),
-            Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => return,
+            let wait = RECONNECT_AFTER.saturating_sub(last_attempt.elapsed());
+            match commands.recv_timeout(wait.max(Duration::from_millis(1))) {
+                Ok(command) => Some(command),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
         };
         for command in first.into_iter().chain(commands.try_iter()) {
             run(command, client.as_mut(), &mut pollers);
@@ -80,9 +90,12 @@ fn serve(mut client: Option<Client>, mut connector: Connector, commands: &Receiv
             continue;
         };
         let alive = exchange(connected);
-        pollers.retain_mut(|poller| !poller(connected));
+        pollers.retain_mut(|poller| !poller(Some(&mut *connected)));
         if !alive {
             tracing::warn!("the inference connection closed; connecting again");
+            for mut poller in pollers.drain(..) {
+                poller(None);
+            }
             client = None;
             last_attempt = Instant::now()
                 .checked_sub(RECONNECT_AFTER)
@@ -99,7 +112,7 @@ fn run(command: Command, client: Option<&mut Client>, pollers: &mut Vec<Poller>)
                 && let Ok(pending) = client.cancel(job_id)
             {
                 pollers.push(Box::new(move |client| {
-                    !matches!(client.take(&pending), Ok(None))
+                    client.is_none_or(|client| !matches!(client.take(&pending), Ok(None)))
                 }));
             }
         }
