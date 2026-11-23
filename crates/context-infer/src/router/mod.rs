@@ -47,6 +47,8 @@ const MIN_HANG_TIME: Duration = Duration::from_secs(1);
 /// Hung model threads that may still hold memory. Above this, the router loads no new model;
 /// a restart of the service frees them.
 const MAX_ABANDONED_WORKERS: usize = 2;
+/// A caller that finds its model loading for another caller tries the next candidate.
+const LOADING_RETRY: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug)]
 pub struct RouterSettings {
@@ -60,6 +62,8 @@ pub struct RouterSettings {
     /// A call with no measured latency counts as hung after this long. A call that only
     /// outlasts its caller's deadline keeps running and keeps its model.
     pub unmeasured_call_limit: Duration,
+    /// A model load counts as hung after this long.
+    pub load_limit: Duration,
 }
 
 impl RouterSettings {
@@ -71,6 +75,7 @@ impl RouterSettings {
             breaker: BreakerSettings::default(),
             watchdog_grace: Duration::from_millis(250),
             unmeasured_call_limit: Duration::from_secs(600),
+            load_limit: Duration::from_secs(300),
         }
     }
 }
@@ -90,6 +95,7 @@ pub struct Router {
     breaker_settings: BreakerSettings,
     watchdog_grace: Duration,
     unmeasured_call_limit: Duration,
+    load_limit: Duration,
     abandoned_workers: Arc<AtomicUsize>,
     state: Mutex<RouterState>,
 }
@@ -151,6 +157,7 @@ impl Router {
             breaker_settings: settings.breaker,
             watchdog_grace: settings.watchdog_grace,
             unmeasured_call_limit: settings.unmeasured_call_limit,
+            load_limit: settings.load_limit,
             abandoned_workers: Arc::new(AtomicUsize::new(0)),
             state: Mutex::new(RouterState::new(settings.policy, settings.benchmarks)),
         }
@@ -158,6 +165,15 @@ impl Router {
 
     pub fn registry(&self) -> &Registry {
         &self.registry
+    }
+
+    /// True when so many model threads hang that only a restart of the process frees them.
+    pub fn needs_restart(&self) -> bool {
+        self.abandoned_workers.load(Ordering::SeqCst) >= MAX_ABANDONED_WORKERS
+    }
+
+    pub fn policy(&self) -> Policy {
+        self.lock().policy
     }
 
     pub fn set_policy(&self, policy: Policy) {
@@ -350,6 +366,7 @@ impl Router {
             };
             match self.attempt::<C, R>(&attempt, move |model| call(model)) {
                 Ok(value) => return Ok((value, candidate)),
+                Err(error @ InferError::InvalidInput(_)) => return Err(error),
                 Err(error) => {
                     tracing::debug!(?task, ?candidate, %error, "falling through");
                     last_error = error;
@@ -372,8 +389,8 @@ impl Router {
         R: Send + 'static,
     {
         let key = LoadedKey::new(C::CAPABILITY, attempt.candidate);
-        let sender = match self.worker_sender::<C>(&key, attempt.candidate) {
-            Ok(sender) => sender,
+        let (sender, started_the_load) = match self.worker_sender::<C>(&key, attempt.candidate) {
+            Ok(worker) => worker,
             Err(error) => {
                 self.settle::<C>(attempt, &key, Verdict::Inconclusive, WorkerFate::Keep, None);
                 return Err(error);
@@ -382,8 +399,14 @@ impl Router {
         if sender.is_hung(Instant::now()) {
             self.settle::<C>(attempt, &key, Verdict::Failed, WorkerFate::Abandon, None);
             return Err(InferError::Backend(
-                "the model hangs in an earlier call".into(),
+                "the model hangs in its load or in an earlier call".into(),
             ));
+        }
+        if sender.is_loading() && !started_the_load {
+            self.settle::<C>(attempt, &key, Verdict::Inconclusive, WorkerFate::Keep, None);
+            return Err(InferError::Busy {
+                retry_after: LOADING_RETRY,
+            });
         }
         let hang_budget = attempt
             .expected
@@ -412,7 +435,15 @@ impl Router {
             let result = call(model);
             let _ = events.send(CallEvent::Finished(result, started.elapsed()));
         });
-        sender.send(attempt.job.priority, ModelJob { hang_budget, run });
+        if let Err(error) = sender.send(attempt.job.priority, ModelJob { hang_budget, run }) {
+            let fate = if matches!(error, InferError::Busy { .. }) {
+                WorkerFate::Keep
+            } else {
+                WorkerFate::Remove
+            };
+            self.settle::<C>(attempt, &key, Verdict::Inconclusive, fate, None);
+            return Err(error);
+        }
         let wait_until = |limit: Instant| {
             (limit + self.watchdog_grace).saturating_duration_since(Instant::now())
         };
@@ -463,14 +494,15 @@ impl Router {
         result
     }
 
+    /// The model's thread, started now when there is none; true when this call started it.
     fn worker_sender<C: Loadable + ?Sized>(
         &self,
         key: &LoadedKey,
         candidate: &Candidate,
-    ) -> Result<JobSender<C>, InferError> {
+    ) -> Result<(JobSender<C>, bool), InferError> {
         let mut state = self.lock();
         if let Some(sender) = state.sender::<C>(key, Instant::now()) {
-            return Ok(sender);
+            return Ok((sender, false));
         }
         if self.abandoned_workers.load(Ordering::SeqCst) >= MAX_ABANDONED_WORKERS {
             return Err(InferError::Unavailable(
@@ -484,11 +516,12 @@ impl Router {
         let worker = ModelWorker::spawn(
             format!("model {}", candidate.model),
             move || load::<C>(backend.as_deref(), &registry, &owned_candidate, &models_dir),
+            self.load_limit,
             Arc::clone(&self.abandoned_workers),
         )?;
         let sender = worker.sender();
         state.insert_worker(key.clone(), worker, Instant::now());
-        Ok(sender)
+        Ok((sender, true))
     }
 
     /// Records the verdict and the latency, then drops or abandons the model thread after

@@ -14,4 +14,8 @@ pub enum InferError {
     Schema(String),
     #[error("the backend is busy; retry after {retry_after:?}")]
     Busy { retry_after: Duration },
+    /// The request itself is wrong (a NUL byte, a bad schema, a missing variable); no other
+    /// candidate can do better.
+    #[error("the request is not valid: {0}")]
+    InvalidInput(String),
 }

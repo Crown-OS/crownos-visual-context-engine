@@ -172,30 +172,67 @@ fn a_large_batch_gets_a_hang_limit_in_proportion_to_its_size() {
 }
 
 #[test]
-fn concurrent_cold_calls_share_one_load() {
+fn concurrent_cold_calls_never_load_a_model_twice() {
     let harness = Harness::all_devices();
-    *harness.llama.load_time.lock().unwrap() = Duration::from_millis(300);
+    for device in [Device::Cuda, Device::Vulkan, Device::Cpu] {
+        harness
+            .llama
+            .set_load_time(device, Duration::from_millis(300));
+    }
     thread::scope(|scope| {
         let calls: Vec<_> = (0..4)
             .map(|_| scope.spawn(|| harness.describe(QUICK)))
             .collect();
         for call in calls {
-            assert_eq!(call.join().unwrap().unwrap(), "small@Cuda");
+            let answer = call.join().unwrap();
+            assert!(
+                matches!(answer, Ok(_) | Err(InferError::Busy { .. })),
+                "{answer:?}"
+            );
         }
     });
-    assert_eq!(harness.llama.load_count(), 1);
+    for device in [Device::Cuda, Device::Vulkan, Device::Cpu] {
+        assert!(harness.llama.loads_on(device) <= 1, "{device:?}");
+    }
 }
 
 #[test]
 fn a_load_slower_than_the_deadline_keeps_the_model_and_the_breaker_closed() {
     let harness = Harness::all_devices();
-    *harness.llama.load_time.lock().unwrap() = Duration::from_millis(500);
+    harness
+        .llama
+        .set_load_time(Device::Cuda, Duration::from_millis(500));
     assert!(matches!(
         harness.describe(Duration::from_millis(50)),
         Err(InferError::Timeout)
     ));
+    thread::sleep(Duration::from_millis(700));
     assert_eq!(harness.describe(QUICK).unwrap(), "small@Cuda");
-    assert_eq!(harness.llama.load_count(), 1);
+    assert_eq!(harness.llama.loads_on(Device::Cuda), 1);
+}
+
+#[test]
+fn a_load_that_never_ends_lets_other_callers_through_and_is_abandoned() {
+    let mut short_limit = settings();
+    short_limit.load_limit = Duration::from_millis(300);
+    let harness = Harness::new(&[Device::Cuda, Device::Vulkan], &[], short_limit);
+    harness
+        .llama
+        .set_load_time(Device::Cuda, Duration::from_secs(30));
+    assert!(matches!(
+        harness.describe(Duration::from_millis(100)),
+        Err(InferError::Timeout)
+    ));
+    assert_eq!(harness.describe(SECOND).unwrap(), "small@Vulkan");
+    thread::sleep(Duration::from_millis(400));
+    assert_eq!(harness.describe(SECOND).unwrap(), "small@Vulkan");
+    let loaded = harness.router.loaded_models();
+    assert!(
+        loaded
+            .iter()
+            .all(|(_, _, _, device)| *device != Device::Cuda)
+    );
+    assert!(!harness.router.needs_restart());
 }
 
 #[test]

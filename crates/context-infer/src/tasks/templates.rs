@@ -49,11 +49,11 @@ impl PromptTemplate {
             user.push_str(before);
             let after_open = after_open.get(1..).unwrap_or_default();
             let close = after_open.find('}').ok_or_else(|| {
-                InferError::Schema(format!("the template {} has an open brace", self.id))
+                InferError::InvalidInput(format!("the template {} has an open brace", self.id))
             })?;
             let (name, after_close) = after_open.split_at(close);
             let value = variables.get(name).ok_or_else(|| {
-                InferError::Schema(format!(
+                InferError::InvalidInput(format!(
                     "the template {} needs the variable {name}",
                     self.id
                 ))

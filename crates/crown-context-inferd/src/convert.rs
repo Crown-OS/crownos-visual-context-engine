@@ -49,6 +49,7 @@ pub(crate) fn failure(error: InferError) -> InferFailure {
         InferError::Busy { retry_after } => InferFailure::Busy {
             retry_after_ms: u32::try_from(retry_after.as_millis()).unwrap_or(u32::MAX),
         },
+        InferError::InvalidInput(message) => InferFailure::InvalidInput(message),
     }
 }
 

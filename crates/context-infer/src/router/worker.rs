@@ -7,6 +7,10 @@ use std::time::{Duration, Instant};
 use crate::error::InferError;
 use crate::request::Priority;
 
+/// Jobs waiting for one model; more get `Busy`.
+const MAX_QUEUED_JOBS: usize = 32;
+const QUEUE_RETRY: Duration = Duration::from_millis(200);
+
 /// The body of a job: it gets the loaded model, or the error of its load.
 pub(crate) type JobBody<C> = Box<dyn FnOnce(Result<&C, &InferError>) + Send>;
 
@@ -19,8 +23,9 @@ pub(crate) struct ModelJob<C: ?Sized> {
 struct JobQueues<C: ?Sized> {
     interactive: VecDeque<ModelJob<C>>,
     background: VecDeque<ModelJob<C>>,
-    /// When the running job counts as hung.
+    /// When the load or the running job counts as hung.
     hang_at: Option<Instant>,
+    loading: bool,
     stopping: bool,
     abandoned: bool,
     ended: bool,
@@ -62,17 +67,20 @@ pub(crate) struct JobSender<C: ?Sized> {
 }
 
 impl<C: ?Sized + Send + Sync + 'static> ModelWorker<C> {
-    /// `abandoned_workers` goes down by one when a worker given up as hung ends after all.
+    /// `load` counts as hung after `load_budget`. `abandoned_workers` goes down by one when a
+    /// worker given up as hung ends after all.
     pub(crate) fn spawn(
         name: String,
         load: impl FnOnce() -> Result<Arc<C>, InferError> + Send + 'static,
+        load_budget: Duration,
         abandoned_workers: Arc<AtomicUsize>,
     ) -> Result<Self, InferError> {
         let shared = Arc::new(WorkerShared {
             queues: Mutex::new(JobQueues {
                 interactive: VecDeque::new(),
                 background: VecDeque::new(),
-                hang_at: None,
+                hang_at: Some(Instant::now() + load_budget),
+                loading: true,
                 stopping: false,
                 abandoned: false,
                 ended: false,
@@ -111,7 +119,7 @@ impl<C: ?Sized> Drop for ModelWorker<C> {
 }
 
 impl<C: ?Sized> JobSender<C> {
-    /// Whether the job that runs now has passed its hang budget.
+    /// Whether the load or the job that runs now has passed its hang budget.
     pub(crate) fn is_hung(&self, now: Instant) -> bool {
         self.shared
             .queues()
@@ -119,14 +127,28 @@ impl<C: ?Sized> JobSender<C> {
             .is_some_and(|hang_at| now >= hang_at)
     }
 
-    pub(crate) fn send(&self, priority: Priority, job: ModelJob<C>) {
+    pub(crate) fn is_loading(&self) -> bool {
+        self.shared.queues().loading
+    }
+
+    /// Queues `job`; an ended or stopping worker and a full queue refuse it.
+    pub(crate) fn send(&self, priority: Priority, job: ModelJob<C>) -> Result<(), InferError> {
         let mut queues = self.shared.queues();
+        if queues.stopping || queues.ended {
+            return Err(InferError::Unavailable("a running model thread".into()));
+        }
+        if queues.interactive.len() + queues.background.len() >= MAX_QUEUED_JOBS {
+            return Err(InferError::Busy {
+                retry_after: QUEUE_RETRY,
+            });
+        }
         match priority {
             Priority::Interactive => queues.interactive.push_back(job),
             Priority::Background => queues.background.push_back(job),
         }
         drop(queues);
         self.shared.wakeup.notify_one();
+        Ok(())
     }
 }
 
@@ -140,6 +162,11 @@ fn serve<C: ?Sized>(
         abandoned_workers,
     };
     let model = load();
+    {
+        let mut queues = shared.queues();
+        queues.loading = false;
+        queues.hang_at = None;
+    }
     let model = model.as_deref();
     loop {
         let job = {
@@ -198,6 +225,7 @@ mod tests {
                 thread::sleep(Duration::from_millis(100));
                 Ok(Arc::from("model"))
             },
+            Duration::from_secs(5),
             Arc::new(AtomicUsize::new(0)),
         )
         .unwrap();
@@ -207,15 +235,18 @@ mod tests {
             (Priority::Interactive, "interactive"),
         ] {
             let order = order.clone();
-            worker.sender().send(
-                priority,
-                ModelJob {
-                    hang_budget: Duration::from_secs(5),
-                    run: Box::new(move |_| {
-                        let _ = order.send(name);
-                    }),
-                },
-            );
+            worker
+                .sender()
+                .send(
+                    priority,
+                    ModelJob {
+                        hang_budget: Duration::from_secs(5),
+                        run: Box::new(move |_| {
+                            let _ = order.send(name);
+                        }),
+                    },
+                )
+                .unwrap();
         }
         let first = finished.recv_timeout(Duration::from_secs(5)).unwrap();
         let second = finished.recv_timeout(Duration::from_secs(5)).unwrap();

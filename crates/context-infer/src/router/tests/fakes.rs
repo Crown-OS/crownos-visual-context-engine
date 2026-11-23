@@ -76,8 +76,8 @@ pub(super) struct FakeRuntime {
     devices: Vec<Device>,
     behaviours: Behaviours,
     log: Arc<Mutex<Vec<String>>>,
-    pub(super) loads: Mutex<usize>,
-    pub(super) load_time: Mutex<Duration>,
+    loads: Mutex<HashMap<Device, usize>>,
+    load_times: Mutex<HashMap<Device, Duration>>,
 }
 
 impl FakeRuntime {
@@ -87,8 +87,8 @@ impl FakeRuntime {
             devices: devices.to_vec(),
             behaviours: Behaviours::default(),
             log: Arc::clone(log),
-            loads: Mutex::new(0),
-            load_time: Mutex::new(Duration::ZERO),
+            loads: Mutex::default(),
+            load_times: Mutex::default(),
         })
     }
 
@@ -99,13 +99,28 @@ impl FakeRuntime {
             .insert((model.to_owned(), device), behaviour);
     }
 
+    /// Loads on every device.
     pub(super) fn load_count(&self) -> usize {
-        *self.loads.lock().unwrap()
+        self.loads.lock().unwrap().values().sum()
+    }
+
+    pub(super) fn loads_on(&self, device: Device) -> usize {
+        self.loads
+            .lock()
+            .unwrap()
+            .get(&device)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(super) fn set_load_time(&self, device: Device, load_time: Duration) {
+        self.load_times.lock().unwrap().insert(device, load_time);
     }
 
     fn fake_model(&self, spec: &LoadSpec<'_>) -> FakeModel {
-        thread::sleep(*self.load_time.lock().unwrap());
-        *self.loads.lock().unwrap() += 1;
+        let load_time = self.load_times.lock().unwrap().get(&spec.device).copied();
+        thread::sleep(load_time.unwrap_or_default());
+        *self.loads.lock().unwrap().entry(spec.device).or_default() += 1;
         FakeModel {
             label: format!("{}@{:?}", spec.model_id, spec.device),
             key: (spec.model_id.to_owned(), spec.device),
