@@ -105,7 +105,7 @@ async fn visit(reader: &Reader<'_>, object: &ObjectRefOwned) -> Visit {
         Err(error) => return Visit::Failed(error),
     };
     let (children, children_complete) = match children {
-        Ok(children) => (children, true),
+        Ok(children) => (children.present, !children.skipped_null),
         Err(ReadError::Unsupported) => (Vec::new(), true),
         Err(_) => (Vec::new(), false),
     };

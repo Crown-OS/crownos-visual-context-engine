@@ -29,7 +29,7 @@ pub(crate) async fn active_frame(
     reader: &Reader<'_>,
     root: &ObjectRefOwned,
 ) -> Result<Option<ObjectRefOwned>, ReadError> {
-    let frames = reader.children(root).await?;
+    let frames = reader.children(root).await?.present;
     let mut states = gather_until(
         frames.iter().enumerate().map(|(index, frame)| async move {
             (index, reader.state(frame).await.unwrap_or_default())

@@ -7,6 +7,9 @@
 //! password field stops the read and flags the window sensitive. Each application has a read
 //! budget and a backoff; text near to text sent in the last minute is dropped.
 //!
+//! A read cut short, by a budget or by a subtree the toolkit has not built, sends no text and
+//! flags nothing: OCR in the capture path covers that window, with its own secret detection.
+//!
 //! The compositor turns the session switch `org.a11y.Status.IsEnabled` on at startup. The
 //! collector does not touch it.
 

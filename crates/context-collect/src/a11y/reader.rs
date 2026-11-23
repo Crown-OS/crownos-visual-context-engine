@@ -37,6 +37,28 @@ pub enum ReadError {
     Reply(#[from] zbus::zvariant::Error),
 }
 
+/// The children an accessible lists. Chromium lists a null object where it has not built a
+/// subtree yet: that child is left out, and the list is known to be partial.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Children {
+    pub(crate) present: Vec<ObjectRefOwned>,
+    pub(crate) skipped_null: bool,
+}
+
+impl Children {
+    fn from_listed(listed: Vec<ObjectRefOwned>) -> Self {
+        let before = listed.len();
+        let present: Vec<ObjectRefOwned> = listed
+            .into_iter()
+            .filter(|child| !child.is_null() && child.path_as_str() != NULL_PATH)
+            .collect();
+        Self {
+            skipped_null: present.len() < before,
+            present,
+        }
+    }
+}
+
 /// The a11y bus. The connection never leaves this module: applications are called only through
 /// [`Reader::invoke`], and the bus itself only for pids, the registry and event subscriptions.
 #[derive(Debug)]
@@ -147,17 +169,9 @@ impl Reader<'_> {
         self.invoke(object, AtspiCall::State, &()).await
     }
 
-    /// The children that exist: Chromium lists a null object where it has not built a subtree
-    /// yet.
-    pub(crate) async fn children(
-        &self,
-        object: &ObjectRefOwned,
-    ) -> Result<Vec<ObjectRefOwned>, ReadError> {
-        let children: Vec<ObjectRefOwned> = self.invoke(object, AtspiCall::Children, &()).await?;
-        Ok(children
-            .into_iter()
-            .filter(|child| !child.is_null() && child.path_as_str() != NULL_PATH)
-            .collect())
+    pub(crate) async fn children(&self, object: &ObjectRefOwned) -> Result<Children, ReadError> {
+        let listed: Vec<ObjectRefOwned> = self.invoke(object, AtspiCall::Children, &()).await?;
+        Ok(Children::from_listed(listed))
     }
 
     pub(crate) async fn whole_text(&self, object: &ObjectRefOwned) -> Result<String, ReadError> {
@@ -280,5 +294,21 @@ impl Reader<'_> {
         } else {
             ReadError::Bus(error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_null_child_is_left_out_and_marks_the_list_partial() {
+        let real =
+            ObjectRefOwned::from_static_str_unchecked(":1.4", "/org/a11y/atspi/accessible/7");
+        let null = ObjectRefOwned::from_static_str_unchecked(":1.4", NULL_PATH);
+        let children = Children::from_listed(vec![real.clone(), null]);
+        assert_eq!(children.present, std::slice::from_ref(&real));
+        assert!(children.skipped_null);
+        assert!(!Children::from_listed(vec![real]).skipped_null);
     }
 }

@@ -142,6 +142,7 @@ async fn registered_applications(
         .children(&root)
         .await
         .unwrap_or_default()
+        .present
         .into_iter()
         .filter_map(|application| application.name_as_str().map(str::to_owned))
         .collect()

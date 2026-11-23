@@ -17,9 +17,12 @@ session under /run/user is never used. The apps need a nested compositor that
 runs in a private runtime dir too: pass its absolute socket with --display.
 
 For each app and state the script records the PSS and the CPU time of the app's
-processes, of the a11y bus and registry, and of the collector. Processes are
-found by an environment marker, so the measurement needs no cgroup and no call
-to the user's systemd.
+processes, of the session bus and registry, and of the collector. A group is the
+processes the script started, the members of their own sessions, and their
+descendants, so the measurement needs no cgroup and no call to the user's
+systemd. The a11y bus launcher leaves its parent's session and is not counted.
+VS Code starts from its Electron main process, which the `code` launcher would
+detach into a session of its own.
 
   eval/a11y-cost/run.py --display /tmp/vcge-nested/wayland-1 \\
       --driver target/release/a11y-cost --seconds 600
@@ -41,9 +44,10 @@ from pathlib import Path
 
 STATES = ["off", "enabled", "listening", "reading"]
 CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
-MARKER = "VCGE_COST_GROUP"
 SAMPLE_EVERY = 5.0
 HERE = Path(__file__).resolve().parent
+# The Electron main process itself: the `code` launcher detaches it into a session of its own.
+VSCODE_MAIN = "/usr/share/code/code"
 
 WEB_WORKLOAD = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Cost workload</title></head>
@@ -93,7 +97,7 @@ def app_commands(scratch):
             "--disable-sync", "--disable-background-networking", web,
         ], "web", {}),
         "code": ([
-            "code", "--ozone-platform=wayland", f"--user-data-dir={profile}",
+            VSCODE_MAIN if Path(VSCODE_MAIN).exists() else "code", "--ozone-platform=wayland", f"--user-data-dir={profile}",
             f"--extensions-dir={scratch / 'extensions'}", "--disable-extensions",
             "--skip-welcome", "--skip-release-notes", "--disable-workspace-trust",
             "--disable-telemetry", "--new-window", text,
@@ -110,64 +114,36 @@ def app_commands(scratch):
 
 GROUP_ROOTS = {}
 GROUP_SESSIONS = {}
-GROUP_ARGUMENTS = {}
 
 
-def adopt(group, process, own_session=False, argument=None):
+def adopt(group, process, own_session=False):
     """Counts `process` and its descendants in `group`, and, when it started its own session,
-    every process of that session. A process whose command line holds `argument` counts too:
-    Electron's main process detaches, leaves its session and overwrites its environment."""
-    GROUP_ROOTS.setdefault(group, set()).add(process.pid)
+    every process of that session. Nothing else is matched, so a reused pid or a process of
+    the user's own session can never land in a group. A root counts only while it runs, so its
+    pid cannot be reused into the group."""
+    GROUP_ROOTS.setdefault(group, []).append(process)
     if own_session:
         GROUP_SESSIONS.setdefault(group, set()).add(process.pid)
-    if argument:
-        GROUP_ARGUMENTS[group] = argument.encode()
     return process
 
 
-def own_sessions(own_line, sessions_of):
-    return {sessions_of.get(pid) for pid in own_line}
-
-
 def marked(group):
-    """The pids of a group. Chromium and Electron overwrite their environment with the process
-    title, so the marker alone misses them: the group also holds its root processes, their
-    sessions, the ancestors of a member within the member's session (Electron's main process
-    detaches and leaves only its helpers marked) and every descendant."""
-    needle = f"{MARKER}={group}".encode() + b"\0"
-    roots = GROUP_ROOTS.get(group, set())
+    """The pids of a group: its root processes, the members of their own sessions, and every
+    descendant of those."""
+    roots = {process.pid for process in GROUP_ROOTS.get(group, []) if process.poll() is None}
     sessions = GROUP_SESSIONS.get(group, set())
-    argument = GROUP_ARGUMENTS.get(group)
-    parents, sessions_of, members = {}, {}, set()
+    parents, members = {}, set()
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
         pid = int(entry)
         try:
             fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-            parents[pid] = int(fields[1])
-            with open(f"/proc/{pid}/environ", "rb") as environ:
-                carries_marker = needle in environ.read() + b"\0"
-            if argument and not carries_marker:
-                carries_marker = argument in Path(f"/proc/{pid}/cmdline").read_bytes()
-        except (OSError, IndexError, ValueError):
+        except (OSError, IndexError):
             continue
-        sessions_of[pid] = int(fields[3])
-        if carries_marker or pid in roots or int(fields[3]) in sessions:
+        parents[pid] = int(fields[1])
+        if pid in roots or int(fields[3]) in sessions:
             members.add(pid)
-    own_line = set()
-    pid = os.getpid()
-    while pid > 1:
-        own_line.add(pid)
-        pid = parents.get(pid, 0)
-    for pid in [pid for pid in members if pid not in roots]:
-        parent = parents.get(pid)
-        while (parent and parent > 1 and parent not in own_line
-               and sessions_of.get(parent) == sessions_of.get(pid)
-               and sessions_of.get(parent) not in own_sessions(own_line, sessions_of)):
-            members.add(parent)
-            parent = parents.get(parent)
-    members -= own_line
     grown = True
     while grown:
         grown = False
@@ -175,6 +151,7 @@ def marked(group):
             if pid not in members and parent in members:
                 members.add(pid)
                 grown = True
+    members.discard(os.getpid())
     return sorted(members)
 
 
@@ -264,7 +241,9 @@ def clean_env(runtime, group):
     for name, sub in (("XDG_CONFIG_HOME", "config"), ("XDG_CACHE_HOME", "cache"),
                       ("XDG_DATA_HOME", "data"), ("XDG_STATE_HOME", "state")):
         env[name] = str(runtime / sub)
-    env.update(XDG_RUNTIME_DIR=str(runtime), GSETTINGS_BACKEND="memory", **{MARKER: group})
+    (runtime / "home").mkdir(exist_ok=True)
+    env.update(XDG_RUNTIME_DIR=str(runtime), HOME=str(runtime / "home"),
+               GSETTINGS_BACKEND="memory")
     return env
 
 
@@ -329,7 +308,10 @@ def measure(app, spec, state, args, run_id, scratch):
         return run_workload(app, state, argv, workload, extra, args, session, app_group,
                             driver_group, driver_log, scratch)
     finally:
-        stop_group(driver_group)
+        for driver in GROUP_ROOTS.get(driver_group, []):
+            if driver.poll() is None:
+                driver.kill()
+                driver.wait()
         stop_group(app_group)
         session.close()
 
@@ -337,15 +319,15 @@ def measure(app, spec, state, args, run_id, scratch):
 def run_workload(app, state, argv, workload, extra, args, session, app_group, driver_group,
                  driver_log, scratch):
     app_env = dict(session.env, DBUS_SESSION_BUS_ADDRESS=session.address,
-                   WAYLAND_DISPLAY=args.display, **extra, **{MARKER: app_group})
+                   WAYLAND_DISPLAY=args.display, **extra)
     text = scratch / "workload.txt"
     text.write_text(TEXT_WORKLOAD_LINE * 40)
     adopt(app_group, subprocess.Popen(argv, env=app_env, stdout=subprocess.DEVNULL,
                                       stderr=subprocess.DEVNULL, start_new_session=True),
-          own_session=True, argument=str(scratch / "profile"))
+          own_session=True)
     driver = None
     if state in ("listening", "reading"):
-        driver_env = dict(session.env, RUST_LOG="context_collect=debug", **{MARKER: driver_group})
+        driver_env = dict(session.env, RUST_LOG="context_collect=debug")
         driver_argv = [args.driver, "--bus", session.a11y]
         if state == "reading":
             pid, _ = application(session, app_group)
