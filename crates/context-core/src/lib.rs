@@ -6,6 +6,7 @@ mod ids;
 mod observation;
 mod segment;
 mod time;
+mod util;
 mod window;
 
 pub use ids::{
@@ -19,6 +20,7 @@ pub use segment::{
     ActivityLabel, DocKey, Episode, EpisodeLevel, InputProfile, Segment, SegmentState,
 };
 pub use time::{Micros, TimeRange, Timestamp};
+pub use util::bounded_join::join_within;
 pub use window::{
     AppRef, ContentType, Placement, Sandbox, Sensitivity, WindowIdent, WindowRecord, WindowState,
 };

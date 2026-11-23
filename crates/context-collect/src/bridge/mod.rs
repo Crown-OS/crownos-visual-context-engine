@@ -15,8 +15,10 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use context_core::Observation;
+use rustix::event::{PollFd, PollFlags, Timespec};
+use wayland_client::backend::WaylandError;
 use wayland_client::globals::{BindError, registry_queue_init};
-use wayland_client::{Connection, DispatchError, Proxy};
+use wayland_client::{Connection, DispatchError, EventQueue, Proxy};
 
 pub use crate::util::identifiable_connect::ExposureRefused;
 use crownos_protocols::context::v1::client::crownos_context_manager_v1::Scope;
@@ -24,6 +26,9 @@ pub use link::{CompositorLink, ExposureHook, SensitiveReason};
 use state::BridgeState;
 
 use crate::util::identifiable_connect::connect_identifiable;
+
+/// How long a stop waits for the compositor bridge thread.
+const STOP_WAIT: Duration = Duration::from_secs(5);
 
 /// Where the bridge puts what it sees.
 pub type Outlet = SyncSender<Observation>;
@@ -47,6 +52,8 @@ pub enum BridgeError {
 }
 
 const RETRY: Duration = Duration::from_secs(3);
+/// How long the bridge waits for compositor events before it looks at its stop flag.
+const STOP_CHECK: Duration = Duration::from_millis(200);
 
 /// Spawns the bridge thread. Dropping the handle asks the thread to stop.
 #[derive(Debug)]
@@ -66,8 +73,10 @@ impl BridgeHandle {
 impl Drop for BridgeHandle {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Some(thread) = self.thread.take()
+            && !context_core::join_within(thread, STOP_WAIT)
+        {
+            tracing::warn!(waited = ?STOP_WAIT, "the compositor bridge thread did not stop; leaving it");
         }
     }
 }
@@ -134,7 +143,7 @@ fn run_once(
     connected.store(true, Ordering::Relaxed);
     tracing::info!("bound crownos_context_manager_v1");
     while !stop.load(Ordering::Relaxed) {
-        queue.blocking_dispatch(&mut state)?;
+        dispatch_within(&mut queue, &mut state, STOP_CHECK)?;
         if state.is_revoked() {
             return Err(BridgeError::Revoked);
         }
@@ -144,5 +153,32 @@ fn run_once(
     }
     state.manager.destroy();
     let _ = queue.flush();
+    Ok(())
+}
+
+/// Dispatches the events that come within `timeout`. A blocking dispatch would wait for the
+/// next compositor event, which may never come, and so hold back a stop.
+fn dispatch_within(
+    queue: &mut EventQueue<BridgeState>,
+    state: &mut BridgeState,
+    timeout: Duration,
+) -> Result<(), BridgeError> {
+    queue.flush().map_err(DispatchError::from)?;
+    queue.dispatch_pending(state)?;
+    if let Some(guard) = queue.prepare_read() {
+        let socket = guard.connection_fd();
+        let mut descriptors = [PollFd::new(&socket, PollFlags::IN)];
+        let timeout = Timespec::try_from(timeout).ok();
+        let readable =
+            rustix::event::poll(&mut descriptors, timeout.as_ref()).is_ok_and(|ready| ready > 0);
+        if readable {
+            match guard.read() {
+                Ok(_) => {}
+                Err(WaylandError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(DispatchError::from(error).into()),
+            }
+        }
+    }
+    queue.dispatch_pending(state)?;
     Ok(())
 }

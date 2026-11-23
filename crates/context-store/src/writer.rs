@@ -10,6 +10,9 @@ use context_core::{Episode, FrameRecord, Observation, Segment, SegmentId, TimeRa
 use crate::queries::{self, ForgetOutcome, TextLine};
 use crate::store::{Store, StoreError};
 
+/// How long a stop waits for the store writer thread.
+const STOP_WAIT: Duration = Duration::from_secs(10);
+
 /// The most a batch waits before it commits.
 const COALESCE: Duration = Duration::from_millis(250);
 const QUEUE_DEPTH: usize = 4_096;
@@ -143,7 +146,9 @@ impl Drop for Writer {
                     sender: mpsc::sync_channel(1).0,
                 },
             ));
-            let _ = thread.join();
+            if !context_core::join_within(thread, STOP_WAIT) {
+                tracing::warn!(waited = ?STOP_WAIT, "the store writer thread did not stop; leaving it");
+            }
         }
     }
 }

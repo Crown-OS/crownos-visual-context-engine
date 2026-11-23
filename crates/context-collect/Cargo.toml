@@ -10,7 +10,7 @@ repository.workspace = true
 [dependencies]
 context-core = { workspace = true }
 crownos-protocols = { workspace = true }
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["process", "event"] }
 wayland-client = { workspace = true }
 atspi = { workspace = true }
 zbus = { workspace = true }

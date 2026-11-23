@@ -51,6 +51,9 @@ use crate::{Outlet, WindowTable};
 use collector::Collector;
 use reader::AccessibilityBusConnection;
 
+/// How long a stop waits for the accessibility thread.
+const STOP_WAIT: Duration = Duration::from_secs(5);
+
 /// What the collector needs from the rest of the engine: the windows, the focus, the policy and
 /// a way to flag a window sensitive.
 pub trait AccessibilityHost: Send + 'static {
@@ -104,8 +107,10 @@ pub struct AccessibilityHandle {
 impl Drop for AccessibilityHandle {
     fn drop(&mut self) {
         self.stop.send_replace(true);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Some(thread) = self.thread.take()
+            && !context_core::join_within(thread, STOP_WAIT)
+        {
+            tracing::warn!(waited = ?STOP_WAIT, "the accessibility thread did not stop; leaving it");
         }
     }
 }

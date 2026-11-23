@@ -10,6 +10,9 @@ use crate::capture_hold::CaptureHolds;
 use crate::frame_inbox::FrameInbox;
 use crate::metrics::CaptureMetrics;
 
+/// How long a stop waits for the analysis thread.
+const STOP_WAIT: Duration = Duration::from_secs(5);
+
 const STOP_CHECK: Duration = Duration::from_millis(500);
 
 /// Whether the machine runs on battery now.
@@ -51,8 +54,10 @@ impl AnalysisWorker {
 impl Drop for AnalysisWorker {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Some(thread) = self.thread.take()
+            && !context_core::join_within(thread, STOP_WAIT)
+        {
+            tracing::warn!(waited = ?STOP_WAIT, "the analysis thread did not stop; leaving it");
         }
     }
 }

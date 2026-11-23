@@ -28,6 +28,8 @@ use crate::text_gate::may_read_window;
 const CONTEXT_INTERVAL: Duration = Duration::from_millis(250);
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(60);
 const IDLE_TICK: Duration = Duration::from_secs(5);
+/// How long a stop waits for the pipeline thread.
+const STOP_WAIT: Duration = Duration::from_secs(5);
 
 /// What the API pushes to subscribers.
 #[derive(Debug)]
@@ -59,8 +61,10 @@ impl Pipeline {
 
     pub(crate) fn stop(mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Some(thread) = self.thread.take()
+            && !context_core::join_within(thread, STOP_WAIT)
+        {
+            tracing::warn!(waited = ?STOP_WAIT, "the pipeline thread did not stop; leaving it");
         }
     }
 }

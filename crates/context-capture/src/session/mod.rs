@@ -24,6 +24,9 @@ use crate::frame_inbox::FrameInbox;
 use crate::metrics::CaptureMetrics;
 use state::SessionState;
 
+/// How long a stop waits for the capture session thread.
+const STOP_WAIT: Duration = Duration::from_secs(5);
+
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
@@ -131,8 +134,10 @@ impl Drop for CaptureSession {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         wake(&self.waker);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Some(thread) = self.thread.take()
+            && !context_core::join_within(thread, STOP_WAIT)
+        {
+            tracing::warn!(waited = ?STOP_WAIT, "the capture session thread did not stop; leaving it");
         }
     }
 }
