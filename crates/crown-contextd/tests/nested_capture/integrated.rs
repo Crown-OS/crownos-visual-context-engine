@@ -233,13 +233,14 @@ fn granted_scopes(contextd_log: &str) -> Vec<u32> {
         .collect()
 }
 
-fn frame_rows(state: &Path) -> Vec<(u32, u32, u32)> {
+/// The line counts of the captures taken from `since` on, in microseconds since the epoch.
+fn frame_lines_since(state: &Path, since: i64) -> Vec<u32> {
     let store = Store::open_dir(state).unwrap();
     store
         .connection()
-        .prepare("SELECT width, height, line_count FROM frames")
+        .prepare("SELECT line_count FROM frames WHERE t >= ?1")
         .unwrap()
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .query_map([since], |row| row.get(0))
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap()
@@ -332,6 +333,7 @@ fn integrated_engine_end_to_end() {
     std::thread::sleep(NOISE_PHASE);
     let ocr_before_gtk = ocr_count();
     eprintln!("OCR calls while the noise window had the focus: {ocr_before_gtk}");
+    let gtk_started = context_core::Timestamp::now().0;
     let secret_after = SECRET_AFTER.as_millis().to_string();
     let mut gtk = Process::start(
         "gtk4 probe",
@@ -355,6 +357,14 @@ fn integrated_engine_end_to_end() {
     wait_until("the metadata probe to see the GTK window", STARTUP, || {
         metadata_probe.has_heard(&app_line)
     });
+    let migrated = fs::read_to_string(&access).unwrap();
+    eprintln!("context_access.ron as the compositor left it: {migrated}");
+    let compact: String = migrated.split_whitespace().collect();
+    assert!(
+        compact.contains("migrated_agents:true")
+            && compact.contains(&format!("\"exe:{ENGINE}\":(scopes:[Engine")),
+        "the compositor did not migrate the Engine grant"
+    );
     fs::write(&access, grants(&probe_copy, "", true)).unwrap();
     wait_until("the revoke to reach the metadata probe", STARTUP, || {
         metadata_probe.has_heard("revoked")
@@ -394,8 +404,6 @@ fn integrated_engine_end_to_end() {
         !contextd_log.contains("withdrew the context grant"),
         "the revoke of the probe reached the engine"
     );
-    let migrated = fs::read_to_string(&access).unwrap();
-    eprintln!("context_access.ron after the run: {migrated}");
 
     let lines = stored_lines(&state);
     eprintln!("stored lines: {lines:?}");
@@ -415,13 +423,10 @@ fn integrated_engine_end_to_end() {
         ocr_after_gtk, ocr_before_gtk,
         "OCR ran while the GTK window with a11y text had the focus"
     );
-    let gtk_frames: Vec<(u32, u32, u32)> = frame_rows(&state)
-        .into_iter()
-        .filter(|(width, height, _)| (*width, *height) != (WIDTH, HEIGHT))
-        .collect();
-    eprintln!("frames of the GTK window (width, height, lines): {gtk_frames:?}");
+    let gtk_frames = frame_lines_since(&state, gtk_started);
+    eprintln!("line counts of the captures of the GTK window: {gtk_frames:?}");
     assert!(
-        gtk_frames.iter().any(|(_, _, lines)| *lines > 0),
+        gtk_frames.iter().any(|lines| *lines > 0),
         "no capture of the GTK window took its a11y text"
     );
     assert!(
