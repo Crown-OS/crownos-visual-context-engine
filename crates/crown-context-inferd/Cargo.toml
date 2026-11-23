@@ -27,8 +27,6 @@ context-protocol = { workspace = true }
 context-shm = { workspace = true }
 futures-util = { workspace = true }
 crownos-ipc = { workspace = true, features = ["tokio"] }
-crownos-config = { workspace = true }
-rustix = { workspace = true, features = ["process"] }
 listenfd = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }

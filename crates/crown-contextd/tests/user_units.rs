@@ -5,10 +5,10 @@
     clippy::indexing_slicing
 )]
 
-//! The packaged user units, run by a private `systemd --user`: crown-contextd identifies the
-//! program of an API caller, crown-context-inferd serves crown-contextd and refuses any other
-//! program. A unit option that makes a user namespace would hide every peer's program, so the
-//! test also shows that `PrivateTmp=yes` breaks the identification.
+//! The packaged user units, run by a private `systemd --user`. crown-contextd identifies the
+//! program of an API caller; a unit option that makes a user namespace would hide it, as
+//! `PrivateTmp=yes` shows. crown-context-inferd serves processes of the user from inside its
+//! file system sandbox, which closes crown-contextd's state directory, database and key.
 //!
 //! The manager has its own runtime directory, unit path, configuration and cgroup, so it never
 //! touches the session's user manager or its units. It is stopped by its PID.
@@ -25,11 +25,22 @@ use std::time::{Duration, Instant};
 
 use context_protocol::context::{Client as ContextClient, status};
 use context_protocol::inference::Client as InferenceClient;
+use context_store::{DATABASE_FILE, KEY_FILE};
 use crownos_ipc::{Error, RemoteError};
 
 const TIMEOUT: Option<Duration> = Some(Duration::from_secs(10));
 const STARTUP: Duration = Duration::from_secs(30);
 const USER_MANAGER: &str = "/usr/lib/systemd/systemd";
+/// The inferd unit with a shell in place of inferd, to try what inferd could open.
+const PROBE: &str = "crown-context-inferd-probe.service";
+/// What the probe tries inside the sandbox: each line prints `open <what>` or `closed <what>`.
+const PROBE_SCRIPT: &str = r#"
+check() { if [ "$1" = dir ]; then ls "$3" >/dev/null 2>&1; else cat "$3" >/dev/null 2>&1; fi && echo "open $2" || echo "closed $2"; }
+check dir state "$STATE"
+check file database "$STATE/$DATABASE"
+check file key "$STATE/$KEY"
+touch "$CACHE/probe" 2>/dev/null && echo "open cache" || echo "closed cache"
+"#;
 const TARGETS: [&str; 5] = [
     "default",
     "basic",
@@ -146,6 +157,36 @@ impl UserManager {
         }
     }
 
+    /// The packaged inferd unit, sandbox and all, running a shell that tries to read
+    /// contextd's state directory, database and key, and to write the inferd cache.
+    fn install_sandbox_probe(&self, state: &Path) {
+        let script = self.root.join("probe.sh");
+        fs::write(&script, PROBE_SCRIPT).unwrap();
+        let unit = packaged_unit("crown-context-inferd.service")
+            .replace("Type=simple", "Type=oneshot")
+            .replace(
+                "ExecStart=/usr/bin/crown-context-inferd",
+                &format!("ExecStart=/usr/bin/sh {}", script.display()),
+            );
+        fs::write(self.units.join(PROBE), unit).unwrap();
+        let log = self.root.join("probe.log");
+        let drop_in = self.units.join(format!("{PROBE}.d"));
+        fs::create_dir_all(&drop_in).unwrap();
+        fs::write(
+            drop_in.join("test.conf"),
+            format!(
+                "[Service]\nEnvironment=STATE={}\nEnvironment=DATABASE={DATABASE_FILE}\n\
+                 Environment=KEY={KEY_FILE}\nEnvironment=CACHE=%C/crownos/context\n\
+                 StandardOutput=append:{}\nStandardError=append:{}\n",
+                state.display(),
+                log.display(),
+                log.display()
+            ),
+        )
+        .unwrap();
+        assert!(self.systemctl(&["daemon-reload"]));
+    }
+
     fn log(&self, name: &str) -> String {
         fs::read_to_string(self.root.join(name)).unwrap_or_default()
     }
@@ -233,7 +274,10 @@ fn status_of(runtime: &Path) -> Result<(), Error> {
 #[test]
 #[ignore = "needs systemd; starts a private user manager"]
 fn the_packaged_units_identify_their_peers() {
-    let root = PathBuf::from(format!("/tmp/vcge-units-{}", std::process::id()));
+    // Not in /tmp: the inferd unit has its own /tmp, which would hide the state directory for
+    // a reason other than the one under test.
+    let root =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("vcge-units-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let config = root.join("config");
     fs::create_dir_all(&config).unwrap();
@@ -276,7 +320,6 @@ fn the_packaged_units_identify_their_peers() {
             &format!("--registry {}", registry.display()),
             &[
                 ("LD_LIBRARY_PATH", &llama_libraries(&contextd)),
-                ("CROWN_CONTEXT_ENGINE", &contextd),
                 ("CROWN_CONTEXT_MODELS", &root.join("models")),
                 ("ORT_DYLIB_PATH", &root.join("no-onnxruntime.so")),
             ],
@@ -295,23 +338,35 @@ fn the_packaged_units_identify_their_peers() {
     status_of(&manager.runtime).expect("contextd did not identify this test");
     eprintln!("contextd identified this test and answered");
 
-    wait_until("inferd to serve contextd", || {
-        manager.log("inferd.log").contains("serving crown-contextd")
-    });
-    eprintln!("inferd accepted crown-contextd");
+    let mut client = InferenceClient::connect_in(&manager.runtime.join("crownos")).unwrap();
+    let pending = client.capabilities().unwrap();
+    client
+        .wait(pending, TIMEOUT)
+        .expect("inferd did not serve this test");
+    eprintln!("inferd served a process of the user");
 
-    let refused =
-        InferenceClient::connect_in(&manager.runtime.join("crownos")).and_then(|mut client| {
-            let pending = client.capabilities()?;
-            client.wait(pending, TIMEOUT)
-        });
-    assert!(refused.is_err(), "inferd served this test: {refused:?}");
-    assert!(
-        manager
-            .log("inferd.log")
-            .contains("refused a peer that is not crown-contextd")
+    let state = manager.root.join("home/.local/state/crownos/context");
+    for file in [DATABASE_FILE, KEY_FILE] {
+        assert!(state.join(file).is_file(), "contextd made no {file}");
+    }
+    manager.install_sandbox_probe(&state);
+    assert!(manager.systemctl(&["start", PROBE]));
+    let probe = manager.log("probe.log");
+    eprintln!(
+        "inside the inferd sandbox: {}",
+        probe.trim().replace('\n', ", ")
     );
-    eprintln!("inferd refused this test");
+    for line in [
+        "closed state",
+        "closed database",
+        "closed key",
+        "open cache",
+    ] {
+        assert!(
+            probe.lines().any(|seen| seen == line),
+            "{line} missing: {probe}"
+        );
+    }
 
     fs::write(
         manager

@@ -155,8 +155,7 @@ impl CompositorLink {
         }
     }
 
-    /// The hook that holds the captures while the process is readable to connect.
-    pub fn exposure_hook(&self) -> Option<ExposureHook> {
+    pub(super) fn exposure_hook(&self) -> Option<ExposureHook> {
         self.shared.exposure_hook.lock().ok()?.clone()
     }
 

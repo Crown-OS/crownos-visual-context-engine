@@ -7,7 +7,6 @@ mod accessibility_host;
 mod api;
 mod capture;
 mod capture_output;
-mod inferd_connection;
 mod local_sensitivity;
 mod logging;
 mod pipeline;
@@ -29,6 +28,7 @@ use clap::Parser;
 use context_collect::a11y::{AccessibilityBus, AccessibilityCollector, RecentReadings};
 use context_collect::{CompositorBridge, CompositorLink, replay};
 use context_eval::Trace;
+use context_infer_client::InferdClient;
 use context_policy::{Policy, VisualContext};
 use context_store::{Store, Writer};
 use crownos_config::schema::{ContextAccess, ContextDecision};
@@ -73,9 +73,7 @@ async fn main() -> Result<()> {
         CompositorLink::default()
     };
     let observes_the_compositor = cli.replay.is_none() && section.enabled;
-    // inferd reads this program from /proc when it accepts, so connect while that works.
-    let inferd = observes_the_compositor
-        .then(|| inferd_connection::connect(link.clone(), cli.socket_dir.clone()));
+    let inferd = observes_the_compositor.then(|| InferdClient::new(cli.socket_dir.clone()));
     rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
         .context("turning off core dumps and ptrace for this process")?;
     let policy = Arc::new(Policy::from_section(&section).context("reading visual_context.ron")?);

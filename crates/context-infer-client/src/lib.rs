@@ -10,5 +10,4 @@ mod convert;
 mod frame;
 
 pub use client::InferdClient;
-pub use connection::Connector;
 pub use frame::SealedFrame;

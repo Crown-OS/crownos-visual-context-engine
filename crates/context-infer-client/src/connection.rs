@@ -1,7 +1,5 @@
-//! One connection to crown-context-inferd for the whole process, shared by every caller. inferd
-//! identifies its peer by the program it reads when it accepts the connection, so the
-//! connection is made once, before the process hides itself; a reconnect goes through the
-//! connector, which may make the process readable for that moment.
+//! One connection to crown-context-inferd for the whole process, shared by every caller, so
+//! jobs and their cancels go out on it together. A lost connection is made again.
 
 use std::os::fd::AsFd;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -17,7 +15,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const RECONNECT_AFTER: Duration = Duration::from_secs(3);
 
 /// Makes the connection; called once at the start and again after the connection is lost.
-pub type Connector = Box<dyn FnMut() -> Result<Client, InferError> + Send>;
+pub(crate) type Connector = Box<dyn FnMut() -> Result<Client, InferError> + Send>;
 /// Takes a request's reply once it came. Returns `true` when the request is finished.
 pub(crate) type Poller = Box<dyn FnMut(&mut Client) -> bool + Send>;
 /// Sends a request on the connection, or reports that there is none.

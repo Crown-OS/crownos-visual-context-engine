@@ -17,9 +17,7 @@ context-protocol = { workspace = true }
 context-policy = { workspace = true }
 context-collect = { workspace = true }
 context-capture = { workspace = true }
-context-infer = { workspace = true }
 context-infer-client = { workspace = true }
-thiserror = { workspace = true }
 context-store = { workspace = true }
 context-engine = { workspace = true }
 context-eval = { workspace = true }

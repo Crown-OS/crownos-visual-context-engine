@@ -10,7 +10,7 @@ use context_protocol::inference::Client;
 use context_protocol::{InferReply, JobTicket};
 use crownos_ipc::Pending;
 
-use crate::connection::{Command, Connector, Poller, SharedConnection};
+use crate::connection::{Command, Poller, SharedConnection};
 use crate::convert;
 use crate::frame::SealedFrame;
 
@@ -41,14 +41,8 @@ impl InferdClient {
     /// Connects now to the socket in `socket_dir` (default `$XDG_RUNTIME_DIR/crownos`), and
     /// again the same way after the connection is lost.
     pub fn new(socket_dir: Option<PathBuf>) -> Self {
-        Self::with_connector(Box::new(move || connect(socket_dir.as_deref())))
-    }
-
-    /// Connects now with `connector`, and with it again after the connection is lost. Call it
-    /// before the process turns off `PR_SET_DUMPABLE`, because inferd reads the peer's program.
-    pub fn with_connector(connector: Connector) -> Self {
         Self {
-            connection: SharedConnection::open(connector),
+            connection: SharedConnection::open(Box::new(move || connect(socket_dir.as_deref()))),
         }
     }
 
