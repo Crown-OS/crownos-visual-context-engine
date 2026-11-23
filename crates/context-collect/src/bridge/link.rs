@@ -105,8 +105,8 @@ impl CompositorLink {
         Scope::from_bits_truncate(self.shared.granted.load(Ordering::Relaxed))
     }
 
-    /// A link with the engine scope, as a bound engine has it.
-    #[cfg(feature = "test-support")]
+    /// A link with the engine scope, as a bound engine has it. A replay has no compositor to
+    /// grant it, and tests use it too.
     pub fn with_engine_scope() -> Self {
         let link = Self::default();
         link.set_granted(Scope::Engine.bits());

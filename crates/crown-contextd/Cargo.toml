@@ -35,7 +35,6 @@ tracing-subscriber = { workspace = true }
 tracing-journald = { workspace = true }
 
 [dev-dependencies]
-context-collect = { workspace = true, features = ["test-support"] }
 context-shm = { workspace = true }
 proptest = { workspace = true }
 rusqlite = { workspace = true }

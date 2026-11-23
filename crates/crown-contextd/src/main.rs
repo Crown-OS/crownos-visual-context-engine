@@ -94,7 +94,11 @@ async fn main() -> Result<()> {
 
     let (outlet, observations) = mpsc::sync_channel(OBSERVATION_QUEUE);
     let shared = Arc::new(Mutex::new(Shared::new(section.enabled)));
-    let link = CompositorLink::default();
+    let link = if cli.replay.is_some() {
+        CompositorLink::with_engine_scope()
+    } else {
+        CompositorLink::default()
+    };
     let readings = RecentReadings::default();
     let accessibility = if cli.replay.is_none() && section.enabled {
         let host = ContextHost::new(link.clone(), Arc::clone(&policy), Arc::clone(&shared));
