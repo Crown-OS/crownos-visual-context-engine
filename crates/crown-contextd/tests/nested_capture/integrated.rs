@@ -268,8 +268,7 @@ fn integrated_engine_end_to_end() {
     let probe_binary = PathBuf::from(std::env::var_os(PROBE_ENV).expect("set VCGE_CONTEXT_PROBE"));
     assert_engine_is_this_build();
 
-    let root = PathBuf::from(format!("/tmp/w8e2e-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let root = test_root();
     let runtime = private_directory(&root.join("run"));
     let config = private_directory(&root.join("config"));
     let state = private_directory(&root.join("state"));
@@ -325,12 +324,14 @@ fn integrated_engine_end_to_end() {
             .arg(&services)
             .env(
                 "RUST_LOG",
-                "info,context_capture=debug,crown_contextd=debug,context_collect=debug",
+                "info,context_capture=debug,crown_contextd=debug,context_collect=debug,context_infer_client=debug",
             ),
         &root.join("contextd.log"),
     );
 
-    std::thread::sleep(NOISE_PHASE);
+    std::thread::sleep(CONTROL_AFTER);
+    let control = capture_positive_control(&runtime, &display, &root);
+    std::thread::sleep(NOISE_PHASE - CONTROL_AFTER);
     let ocr_before_gtk = ocr_count();
     eprintln!("OCR calls while the noise window had the focus: {ocr_before_gtk}");
     let gtk_started = context_core::Timestamp::now().0;
@@ -373,13 +374,18 @@ fn integrated_engine_end_to_end() {
     if let Some(left) = RUN_LENGTH.checked_sub(contextd_started.elapsed()) {
         std::thread::sleep(left);
     }
-    contextd.interrupt_then_wait(Duration::from_secs(15));
+    let contextd_stopped = contextd.interrupt_then_wait(Duration::from_secs(15));
     gtk.interrupt_then_wait(Duration::from_secs(2));
     noise.interrupt_then_wait(Duration::from_secs(2));
     metadata_probe
         .process
         .interrupt_then_wait(Duration::from_secs(2));
     compositor.interrupt_then_wait(Duration::from_secs(10));
+    assert!(
+        contextd_stopped,
+        "contextd did not stop on SIGINT; see {}",
+        root.join("contextd.log").display()
+    );
 
     let compositor_log = without_colours(&fs::read_to_string(root.join("compositor.log")).unwrap());
     let contextd_log = without_colours(&fs::read_to_string(root.join("contextd.log")).unwrap());
@@ -444,6 +450,6 @@ fn integrated_engine_end_to_end() {
     assert!(heard.iter().any(|line| line == "scope"));
     assert!(!heard.iter().any(|line| line == "title"), "{heard:?}");
 
-    assert_no_pixels_on_disk(&root, &state, started, RUN_LENGTH);
+    assert_no_pixels_on_disk(&root, &state, started, RUN_LENGTH, &control);
     let _ = fs::remove_dir_all(&root);
 }

@@ -1,4 +1,5 @@
-//! A toplevel that shows seeded noise, so any copy of its pixels can be found later.
+//! A toplevel that shows flat blocks of seeded colours at the size the compositor asks for, so
+//! any copy of its pixels can be found later.
 
 use std::fs::File;
 use std::io::Write;
@@ -7,7 +8,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use context_eval::pixel_scan::noise_pixels;
+use context_eval::pixel_scan::colour_blocks;
 use rustix::fs::MemfdFlags;
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
@@ -17,16 +18,30 @@ use wayland_client::protocol::{
 use wayland_client::{Connection, Dispatch, QueueHandle, delegate_noop};
 use wayland_protocols::xdg::shell::client::{
     xdg_surface::{self, XdgSurface},
-    xdg_toplevel::XdgToplevel,
+    xdg_toplevel::{self, XdgToplevel},
     xdg_wm_base::{self, XdgWmBase},
 };
 
-pub(crate) const WIDTH: u32 = 240;
-pub(crate) const HEIGHT: u32 = 160;
+/// The size when the compositor leaves it to the window.
+const WIDTH: u32 = 240;
+const HEIGHT: u32 = 160;
 
 #[derive(Default)]
 struct WindowState {
     configured: bool,
+    /// The size of the last toplevel configure, applied with the surface configure.
+    asked: (u32, u32),
+    size: (u32, u32),
+    resized: bool,
+}
+
+impl WindowState {
+    const fn size(&self) -> (u32, u32) {
+        match self.size {
+            (0, _) | (_, 0) => (WIDTH, HEIGHT),
+            size => size,
+        }
+    }
 }
 
 impl Dispatch<WlRegistry, GlobalListContents> for WindowState {
@@ -68,6 +83,10 @@ impl Dispatch<XdgSurface, ()> for WindowState {
         if let xdg_surface::Event::Configure { serial } = event {
             surface.ack_configure(serial);
             state.configured = true;
+            if state.asked != state.size {
+                state.size = state.asked;
+                state.resized = true;
+            }
         }
     }
 }
@@ -77,7 +96,23 @@ delegate_noop!(WindowState: ignore WlSurface);
 delegate_noop!(WindowState: ignore WlShm);
 delegate_noop!(WindowState: ignore WlShmPool);
 delegate_noop!(WindowState: ignore WlBuffer);
-delegate_noop!(WindowState: ignore XdgToplevel);
+impl Dispatch<XdgToplevel, ()> for WindowState {
+    fn event(
+        state: &mut Self,
+        _: &XdgToplevel,
+        event: xdg_toplevel::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_toplevel::Event::Configure { width, height, .. } = event {
+            state.asked = (
+                u32::try_from(width).unwrap_or(0),
+                u32::try_from(height).unwrap_or(0),
+            );
+        }
+    }
+}
 
 /// Shows the window until the process is killed. Each round draws `seed_for(round)` and
 /// retitles the window, so the engine sees a title change and new damage.
@@ -112,13 +147,18 @@ fn run(
     }
     let mut round = 0_u64;
     let mut round_started = Instant::now();
-    draw(&shm, &surface, seed_for(round), &handle)?;
+    draw(&shm, &surface, seed_for(round), state.size(), &handle)?;
+    state.resized = false;
     loop {
         if round_started.elapsed() >= round_length {
             round += 1;
             round_started = Instant::now();
             toplevel.set_title(format!("Noise {round}"));
-            draw(&shm, &surface, seed_for(round), &handle)?;
+            state.resized = true;
+        }
+        if state.resized {
+            state.resized = false;
+            draw(&shm, &surface, seed_for(round), state.size(), &handle)?;
         }
         queue.roundtrip(&mut state)?;
         std::thread::sleep(Duration::from_millis(100));
@@ -129,9 +169,10 @@ fn draw(
     shm: &WlShm,
     surface: &WlSurface,
     seed: u64,
+    (width, height): (u32, u32),
     handle: &QueueHandle<WindowState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let pixels = noise_pixels(seed, WIDTH, HEIGHT);
+    let pixels = colour_blocks(seed, width, height);
     let mut memfd = File::from(rustix::fs::memfd_create(
         "vcge-test-window",
         MemfdFlags::CLOEXEC,
@@ -141,9 +182,9 @@ fn draw(
     let pool = shm.create_pool(memfd.as_fd(), length, handle, ());
     let buffer = pool.create_buffer(
         0,
-        i32::try_from(WIDTH)?,
-        i32::try_from(HEIGHT)?,
-        i32::try_from(WIDTH * 4)?,
+        i32::try_from(width)?,
+        i32::try_from(height)?,
+        i32::try_from(width * 4)?,
         wl_shm::Format::Xrgb8888,
         handle,
         (),

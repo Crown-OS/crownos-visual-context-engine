@@ -5,13 +5,15 @@
     clippy::indexing_slicing
 )]
 
-//! Analyse, then delete, end to end. A nested crownpositor runs a window of seeded noise for two
+//! Analyse, then delete, end to end. A nested crownpositor runs a window of seeded colour blocks for two
 //! minutes while crown-contextd captures it. Then the state directory, the runtime directories,
 //! `/tmp`, `/dev/shm` and every database value must hold no run of those pixels and no image.
 //!
 //! The compositor gives the Engine scope only to a root-owned `/usr/bin/crown-contextd`, so
-//! the tests run in a user and mount namespace where an overlay puts this build there. Run them
-//! through `run-in-namespace.sh`, with the compositor binary in `VCGE_NESTED_COMPOSITOR`.
+//! the tests run in a user, mount and pid namespace where an overlay puts this build there. In
+//! that namespace every file of the user looks owned by root, and the real root's files look
+//! owned by nobody. Run the tests through `run-in-namespace.sh`, with the compositor binary in
+//! `VCGE_NESTED_COMPOSITOR`.
 
 mod fake_inferd;
 mod integrated;
@@ -23,12 +25,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
-use context_eval::pixel_scan::{PixelNeedles, noise_pixels};
+use context_eval::pixel_scan::PixelNeedles;
 use context_store::Store;
 use rustix::process::{Pid, Signal};
 
 use pixel_search::{Findings, Search};
-use test_window::{HEIGHT, WIDTH};
 
 const RUN_LENGTH: Duration = Duration::from_secs(120);
 /// The one executable that may hold the Engine scope.
@@ -40,6 +41,10 @@ const NO_X11_BRIDGE: &str = "/nonexistent/xwayland-satellite";
 /// opens on the nested compositor's own output and gets the focus.
 const WINDOW_SOCKET_ENV: &str = "VCGE_TEST_WINDOW_SOCKET";
 const ROUND_LENGTH: Duration = Duration::from_secs(15);
+/// When the positive control is captured: the window shows by then.
+const CONTROL_AFTER: Duration = Duration::from_secs(10);
+/// Set by `run-in-namespace.sh` to a directory it made with `mkdtemp`.
+const TEST_ROOT_ENV: &str = "VCGE_TEST_ROOT";
 
 const fn seed_for(round: u64) -> u64 {
     0x5643_4745 ^ round.wrapping_mul(0x9E37_79B9)
@@ -64,14 +69,15 @@ impl Process {
         Self { name, child }
     }
 
-    fn interrupt_then_wait(&mut self, grace: Duration) {
+    /// Returns whether the process stopped within `grace`.
+    fn interrupt_then_wait(&mut self, grace: Duration) -> bool {
         if let Some(pid) = Pid::from_raw(i32::try_from(self.child.id()).unwrap()) {
             let _ = rustix::process::kill_process(pid, Signal::INT);
         }
         let deadline = Instant::now() + grace;
         while Instant::now() < deadline {
             if matches!(self.child.try_wait(), Ok(Some(_))) {
-                return;
+                return true;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -82,6 +88,7 @@ impl Process {
         );
         let _ = self.child.kill();
         let _ = self.child.wait();
+        false
     }
 }
 
@@ -165,7 +172,7 @@ fn needles_for_all_rounds(run_length: Duration) -> PixelNeedles {
     let mut needles = PixelNeedles::default();
     let rounds = run_length.as_secs() / ROUND_LENGTH.as_secs() + 2;
     for round in 0..rounds {
-        needles.add_xrgb(&noise_pixels(seed_for(round), WIDTH, HEIGHT));
+        needles.add_seed(seed_for(round));
     }
     needles
 }
@@ -177,8 +184,7 @@ fn no_pixels_reach_disk_after_two_minutes_of_capture() {
         std::env::var_os("VCGE_NESTED_COMPOSITOR").expect("set VCGE_NESTED_COMPOSITOR"),
     );
     assert_engine_is_this_build();
-    let root = std::env::temp_dir().join(format!("vcge-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&root);
+    let root = test_root();
     let runtime = private_directory(&root.join("runtime"));
     let config = private_directory(&root.join("config"));
     let state = private_directory(&root.join("state"));
@@ -234,10 +240,17 @@ fn no_pixels_reach_disk_after_two_minutes_of_capture() {
         &root.join("contextd.log"),
     );
 
-    std::thread::sleep(RUN_LENGTH);
-    contextd.interrupt_then_wait(Duration::from_secs(15));
+    std::thread::sleep(CONTROL_AFTER);
+    let control = capture_positive_control(&runtime, &socket, &root);
+    std::thread::sleep(RUN_LENGTH - CONTROL_AFTER);
+    let contextd_stopped = contextd.interrupt_then_wait(Duration::from_secs(15));
     window.interrupt_then_wait(Duration::from_secs(2));
     compositor.interrupt_then_wait(Duration::from_secs(10));
+    assert!(
+        contextd_stopped,
+        "contextd did not stop on SIGINT; see {}",
+        root.join("contextd.log").display()
+    );
 
     let log = without_colours(&fs::read_to_string(root.join("contextd.log")).unwrap());
     assert!(
@@ -278,20 +291,41 @@ fn no_pixels_reach_disk_after_two_minutes_of_capture() {
     );
     drop(store);
 
-    assert_no_pixels_on_disk(&root, &state, started, RUN_LENGTH);
+    assert_no_pixels_on_disk(&root, &state, started, RUN_LENGTH, &control);
     let _ = fs::remove_dir_all(&root);
 }
 
+/// The directory the test owns, made by `run-in-namespace.sh` with `mkdtemp`.
+fn test_root() -> PathBuf {
+    PathBuf::from(std::env::var_os(TEST_ROOT_ENV).expect("run through run-in-namespace.sh"))
+}
+
+/// A frame of the nested output with the test window on it, captured the way any host app
+/// can, written as a PPM to `root`.
+fn capture_positive_control(runtime: &Path, display: &Path, root: &Path) -> PathBuf {
+    let control = root.join("positive-control.ppm");
+    let status = Command::new("grim")
+        .args(["-t", "ppm"])
+        .arg(&control)
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("WAYLAND_DISPLAY", display)
+        .status()
+        .unwrap();
+    assert!(status.success(), "grim could not capture the nested output");
+    control
+}
+
 /// No run of the test window's pixels and no image in the state directory, its database, the
-/// runtime directories, `/tmp` or `/dev/shm`. A planted run proves that the search finds one.
-fn assert_no_pixels_on_disk(root: &Path, state: &Path, started: SystemTime, run_length: Duration) {
+/// runtime directories, `/tmp` or `/dev/shm`. The search must first find the window in a real
+/// capture of the output, `control`.
+fn assert_no_pixels_on_disk(
+    root: &Path,
+    state: &Path,
+    started: SystemTime,
+    run_length: Duration,
+    control: &Path,
+) {
     let needles = needles_for_all_rounds(run_length);
-    let control = root.join("positive-control.bin");
-    fs::write(
-        &control,
-        &noise_pixels(seed_for(0), WIDTH, HEIGHT)[4_000..4_100],
-    )
-    .unwrap();
     let mut planted = Findings::default();
     let own = [root.to_owned()];
     let search = Search {
@@ -302,10 +336,10 @@ fn assert_no_pixels_on_disk(root: &Path, state: &Path, started: SystemTime, run_
     search.directory(root, &mut planted);
     assert_eq!(
         planted.pixel_runs,
-        std::slice::from_ref(&control),
-        "the search finds a planted run"
+        [control],
+        "the search finds the window in a capture of the output"
     );
-    fs::remove_file(&control).unwrap();
+    fs::remove_file(control).unwrap();
 
     let mut findings = Findings::default();
     let values = pixel_search::database(state, &needles, &mut findings);

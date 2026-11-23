@@ -21,7 +21,7 @@ use context_core::{
     FrameRecord, Micros, Observation, ObservationKind, Placement, SelectionKind, SessionState,
     TextSource, Timestamp, Trigger, WindowIdent, WindowRecord,
 };
-use context_eval::pixel_scan::{PixelNeedles, noise_pixels};
+use context_eval::pixel_scan::{PixelNeedles, colour_blocks};
 use context_policy::{Policy, VisualContext};
 use context_store::{Store, Writer};
 use proptest::prelude::*;
@@ -147,9 +147,9 @@ fn files_in(dir: &Path) -> Vec<Vec<u8>> {
 
 fn run_case(case: u64, width: u32, height: u32, lines: Vec<String>) {
     let state_dir = scratch_dir(case);
-    let pixels = noise_pixels(case, width, height);
+    let pixels = colour_blocks(case, width, height);
     let mut needles = PixelNeedles::default();
-    needles.add_xrgb(&pixels);
+    needles.add_seed(case);
 
     let writer = Writer::spawn(Store::open_dir(&state_dir).unwrap()).unwrap();
     let section = VisualContext {
@@ -226,9 +226,9 @@ fn run_case(case: u64, width: u32, height: u32, lines: Vec<String>) {
 
 #[test]
 fn the_scan_finds_a_planted_run_of_pixels() {
-    let pixels = noise_pixels(1, 32, 32);
+    let pixels = colour_blocks(1, 32, 32);
     let mut needles = PixelNeedles::default();
-    needles.add_xrgb(&pixels);
+    needles.add_seed(1);
     let mut value = b"caption: ".to_vec();
     value.extend_from_slice(&pixels[200..240]);
     assert!(needles.found_in(&value));
