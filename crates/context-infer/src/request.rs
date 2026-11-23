@@ -92,12 +92,13 @@ pub enum Priority {
     Interactive,
 }
 
-/// When a call must finish, how urgent it is, and what can end it sooner.
+/// When a call must finish, how urgent it is, what can end it sooner, and what it holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Job {
     pub deadline: Instant,
     pub priority: Priority,
     pub cancel: JobCancel,
+    pub lease: JobLease,
 }
 
 impl Job {
@@ -106,6 +107,7 @@ impl Job {
             deadline: Instant::now() + budget,
             priority,
             cancel: JobCancel::default(),
+            lease: JobLease::default(),
         }
     }
 }
@@ -132,6 +134,40 @@ impl PartialEq for JobCancel {
 }
 
 impl Eq for JobCancel {}
+
+/// What a job holds while a model works on it, such as a place in the caller's queue. The
+/// router keeps it with the model call, so it goes only when that call returns, also when the
+/// caller stopped waiting.
+#[derive(Clone, Default)]
+pub struct JobLease(Option<Arc<dyn std::any::Any + Send + Sync>>);
+
+impl JobLease {
+    pub fn holding(held: impl std::any::Any + Send + Sync) -> Self {
+        Self(Some(Arc::new(held)))
+    }
+}
+
+impl std::fmt::Debug for JobLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(if self.0.is_some() {
+            "JobLease(held)"
+        } else {
+            "JobLease(none)"
+        })
+    }
+}
+
+impl PartialEq for JobLease {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(one), Some(other)) => Arc::ptr_eq(one, other),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for JobLease {}
 
 #[derive(Clone, Debug)]
 pub struct GenRequest {

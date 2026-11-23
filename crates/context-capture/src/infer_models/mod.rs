@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use context_infer::{InferError, Job, JobCancel, PixelFormat, Priority};
+use context_infer::{InferError, Job, JobCancel, JobLease, PixelFormat, Priority};
 use context_infer_client::{InferdClient, SealedFrame};
 
 use crate::cancellation::ModelCall;
@@ -44,6 +44,7 @@ impl InferScreenModels {
                 deadline: call.deadline,
                 priority: Priority::Interactive,
                 cancel: cancel.clone(),
+                lease: JobLease::default(),
             };
             let answer = call.wait_for(move || attempt(client, job));
             if answer.is_none() {

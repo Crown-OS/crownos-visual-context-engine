@@ -22,7 +22,7 @@ pub use error::InferError;
 pub use media::{Image, ImageLayoutError, Media, PixelFormat, SharedBytes};
 pub use registry::{Capability, Registry};
 pub use request::{
-    GenRequest, Generation, Job, JobCancel, Message, Output, Priority, Role, Sampling,
+    GenRequest, Generation, Job, JobCancel, JobLease, Message, Output, Priority, Role, Sampling,
 };
 pub use router::{
     BenchmarkCache, BreakerSettings, EmbeddedTexts, LoadSpec, Policy, Router, RouterSettings,

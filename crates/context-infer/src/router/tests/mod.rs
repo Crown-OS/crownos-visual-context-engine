@@ -7,6 +7,7 @@
 
 mod fakes;
 
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,7 @@ use crownos_config::system::ai::Device;
 use super::{BenchmarkCache, BreakerSettings, Policy};
 use crate::error::InferError;
 use crate::registry::{Capability, Registry, Tier};
-use crate::request::{Job, Priority};
+use crate::request::{Job, JobLease, Priority};
 use crate::task::Task;
 use fakes::{Behaviour, Harness, REGISTRY, SECOND, settings};
 
@@ -357,4 +358,43 @@ fn a_job_cancelled_before_its_turn_never_runs() {
         Err(InferError::Cancelled)
     ));
     assert!(harness.calls().is_empty());
+}
+
+/// Notes when it drops, as a job's memfd mapping does.
+struct DropClock(Arc<Mutex<Option<Instant>>>);
+
+impl Drop for DropClock {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() = Some(Instant::now());
+    }
+}
+
+#[test]
+fn a_cancelled_job_keeps_its_lease_until_the_model_call_returns() {
+    let harness = Harness::all_devices();
+    harness.llama.set("small", Device::Cuda, Behaviour::Slow);
+    let dropped = Arc::new(Mutex::new(None));
+    let mut job = Job::within(SECOND, Priority::Interactive);
+    job.lease = JobLease::holding(DropClock(Arc::clone(&dropped)));
+    let cancel = job.cancel.clone();
+    let started = Instant::now();
+    let answer = thread::scope(|scope| {
+        scope.spawn(|| {
+            thread::sleep(Duration::from_millis(50));
+            cancel.cancel();
+        });
+        harness.describe_job(job)
+    });
+    let answered = started.elapsed();
+    assert!(matches!(answer, Err(InferError::Cancelled)), "{answer:?}");
+    thread::sleep(Duration::from_millis(500));
+    let dropped_after = dropped.lock().unwrap().unwrap().duration_since(started);
+    assert!(
+        answered < Duration::from_millis(250),
+        "the caller waited {answered:?}"
+    );
+    assert!(
+        dropped_after >= Duration::from_millis(250),
+        "the lease went with the caller, after {dropped_after:?}, not with the model call"
+    );
 }

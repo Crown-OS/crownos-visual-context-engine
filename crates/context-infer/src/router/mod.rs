@@ -422,7 +422,9 @@ impl Router {
         let (events, received) = mpsc::sync_channel(2);
         let deadline = attempt.job.deadline;
         let cancel = attempt.job.cancel.clone();
+        let lease = attempt.job.lease.clone();
         let run = Box::new(move |model: Result<&C, &InferError>| {
+            let _lease = lease;
             let model = match model {
                 Ok(model) => model,
                 Err(load_error) => {

@@ -2,8 +2,8 @@ use std::os::fd::OwnedFd;
 use std::time::{Duration, Instant};
 
 use context_infer::{
-    EmbedPurpose, EmbeddedTexts, Image, InferError, Job, JobCancel, PixelFormat, Priority,
-    ScreenDescription, SharedBytes, TextLine,
+    EmbedPurpose, EmbeddedTexts, Image, InferError, Job, JobCancel, JobLease, PixelFormat,
+    Priority, ScreenDescription, SharedBytes, TextLine,
 };
 use context_protocol::{
     EmbeddedBatch, InferFailure, JobPriority, JobTicket, RecognizedLine, ScreenSummary,
@@ -17,7 +17,16 @@ const MAX_SIDE: u32 = 16_384;
 /// 64 megapixels: two 8K screens.
 const MAX_PIXELS: u64 = 64 << 20;
 
-pub(crate) fn job(ticket: JobTicket, cancel: JobCancel) -> Job {
+/// How a running job can end early, and what it holds until its model call returns: its place
+/// at the sleep gate and its admission permit. The router keeps the lease with the model call,
+/// so a cancelled job still counts until its memfds are unmapped.
+#[derive(Debug, Clone)]
+pub(crate) struct JobControl {
+    pub(crate) cancel: JobCancel,
+    pub(crate) lease: JobLease,
+}
+
+pub(crate) fn job(ticket: JobTicket, control: JobControl) -> Job {
     let budget = ticket.budget_ms.min(MAX_BUDGET_MS);
     Job {
         deadline: Instant::now() + Duration::from_millis(u64::from(budget)),
@@ -25,7 +34,8 @@ pub(crate) fn job(ticket: JobTicket, cancel: JobCancel) -> Job {
             JobPriority::Background => Priority::Background,
             JobPriority::Interactive => Priority::Interactive,
         },
-        cancel,
+        cancel: control.cancel,
+        lease: control.lease,
     }
 }
 

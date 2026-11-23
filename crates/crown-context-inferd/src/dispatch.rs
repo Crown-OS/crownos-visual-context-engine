@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use context_infer::{
-    Capability, ContextTasks, GenRequest, InferError, JobCancel, Media, Output, PROMPT_TEMPLATES,
+    Capability, ContextTasks, GenRequest, InferError, JobLease, Media, Output, PROMPT_TEMPLATES,
     PromptTemplate, Sampling, Task,
 };
 use context_protocol::inference;
@@ -17,7 +17,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::admission::{Admission, Permit};
-use crate::convert;
+use crate::convert::{self, JobControl};
 use crate::engine::Engine;
 use crate::job_gate::JobGate;
 
@@ -142,11 +142,11 @@ impl Dispatcher {
                 peer,
                 message,
                 fixed,
-                |engine, call: inference::ocr, fds, cancel| {
+                |engine, call: inference::ocr, fds, control| {
                     let image = convert::image(call.image, first(&fds)?)?;
                     let lines = engine
                         .router
-                        .recognize_text(image, &convert::job(call.job, cancel));
+                        .recognize_text(image, &convert::job(call.job, control));
                     lines.map(convert::lines).map_err(convert::failure)
                 },
             );
@@ -156,7 +156,7 @@ impl Dispatcher {
                 peer,
                 message,
                 fixed,
-                |engine, call: inference::embed_text, _, cancel| embed_text(engine, call, cancel),
+                |engine, call: inference::embed_text, _, control| embed_text(engine, call, control),
             );
         } else if selector == inference::rerank::SELECTOR {
             self.run(
@@ -164,8 +164,8 @@ impl Dispatcher {
                 peer,
                 message,
                 fixed,
-                |engine, call: inference::rerank, _, cancel| {
-                    let job = convert::job(call.job, cancel);
+                |engine, call: inference::rerank, _, control| {
+                    let job = convert::job(call.job, control);
                     let scores = engine.router.rerank(call.query, call.documents, &job);
                     scores.map_err(convert::failure)
                 },
@@ -176,10 +176,10 @@ impl Dispatcher {
                 peer,
                 message,
                 generation,
-                |engine, call: inference::generate, _, cancel| {
+                |engine, call: inference::generate, _, control| {
                     let template =
                         Template::new(call.template, call.vars, call.schema, call.max_tokens);
-                    generate(engine, call.job, cancel, &template, None)
+                    generate(engine, call.job, control, &template, None)
                 },
             );
         } else if selector == inference::generate_with_image::SELECTOR {
@@ -188,11 +188,11 @@ impl Dispatcher {
                 peer,
                 message,
                 generation,
-                |engine, call: inference::generate_with_image, fds, cancel| {
+                |engine, call: inference::generate_with_image, fds, control| {
                     let image = convert::image(call.image, first(&fds)?)?;
                     let template =
                         Template::new(call.template, call.vars, call.schema, call.max_tokens);
-                    generate(engine, call.job, cancel, &template, Some(image))
+                    generate(engine, call.job, control, &template, Some(image))
                 },
             );
         } else if selector == inference::describe_screen::SELECTOR {
@@ -201,9 +201,9 @@ impl Dispatcher {
                 peer,
                 message,
                 generation,
-                |engine, call: inference::describe_screen, fds, cancel| {
+                |engine, call: inference::describe_screen, fds, control| {
                     let image = convert::image(call.image, first(&fds)?)?;
-                    let job = convert::job(call.job, cancel);
+                    let job = convert::job(call.job, control);
                     let description = engine.tasks.describe_screen(
                         &image,
                         &call.app_name,
@@ -231,7 +231,7 @@ impl Dispatcher {
     ) where
         M: MethodMsg<Args = M> + JobMethod + DeserializeOwned + Send + 'static,
         M::Reply: Serialize + FromFailure + Send + 'static,
-        W: FnOnce(&Engine, M, Vec<OwnedFd>, JobCancel) -> M::Reply + Send + 'static,
+        W: FnOnce(&Engine, M, Vec<OwnedFd>, JobControl) -> M::Reply + Send + 'static,
     {
         let Message {
             req_id: request_id,
@@ -273,9 +273,11 @@ impl Dispatcher {
             tracing::debug!(job_id = ticket.job_id, priority = ?ticket.priority, "job admitted");
         }
         tokio::task::spawn_blocking(move || {
-            let answer = work(&engine, call, fds, running.cancel_token());
-            drop(running);
-            drop(permit);
+            let control = JobControl {
+                cancel: running.cancel_token(),
+                lease: JobLease::holding((running, permit)),
+            };
+            let answer = work(&engine, call, fds, control);
             if let Some(ticket) = ticket {
                 tracing::debug!(job_id = ticket.job_id, "job done");
             }
@@ -400,7 +402,7 @@ fn capabilities(engine: &Engine) -> InferCapabilities {
 fn embed_text(
     engine: &Engine,
     call: inference::embed_text,
-    cancel: JobCancel,
+    control: JobControl,
 ) -> InferReply<context_protocol::EmbeddedBatch> {
     let dimensions = engine
         .router
@@ -412,7 +414,7 @@ fn embed_text(
             call.texts.len()
         )));
     }
-    let job = convert::job(call.job, cancel);
+    let job = convert::job(call.job, control);
     let embedded = engine
         .router
         .embed(call.texts, convert::purpose(call.purpose), &job);
@@ -446,7 +448,7 @@ impl Template {
 fn generate(
     engine: &Engine,
     ticket: JobTicket,
-    cancel: JobCancel,
+    control: JobControl,
     template: &Template,
     image: Option<context_infer::Image>,
 ) -> InferReply<String> {
@@ -462,7 +464,7 @@ fn generate(
             output,
             sampling: Sampling::default(),
             max_tokens: template.max_tokens.min(MAX_GENERATED_TOKENS),
-            job: convert::job(ticket, cancel),
+            job: convert::job(ticket, control),
         };
         Ok((prompt.task, request))
     };

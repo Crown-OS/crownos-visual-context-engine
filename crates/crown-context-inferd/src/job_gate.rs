@@ -164,6 +164,20 @@ mod tests {
     }
 
     #[test]
+    fn sleep_waits_for_the_model_call_that_holds_the_job() {
+        let gate = Arc::new(JobGate::<u32>::default());
+        let lease = context_infer::JobLease::holding(gate.enter(1, Some(1)).unwrap());
+        let model_call = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(lease);
+        });
+        let started = std::time::Instant::now();
+        assert!(gate.close_and_cancel(Duration::from_secs(4)));
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        model_call.join().unwrap();
+    }
+
+    #[test]
     fn a_job_ends_by_its_id_or_with_its_connection() {
         let gate = Arc::new(JobGate::<u32>::default());
         let (first, second) = (1, 2);
