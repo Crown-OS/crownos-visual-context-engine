@@ -12,6 +12,7 @@ members = [
     "crates/context-shm",
     "crates/context-infer-ort",
     "crates/context-infer-llama",
+    "crates/context-infer-http",
     "crates/crown-context-inferd",
     "crates/crown-contextd",
     "crates/crown-context",
