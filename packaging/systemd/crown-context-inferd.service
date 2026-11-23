@@ -1,6 +1,7 @@
 # inferd parses screen pixels in ONNX Runtime and llama.cpp, so it keeps the file system
 # sandbox: it reads the models, writes its cache and nothing else. It cannot open
-# crown-contextd's state directory, so not its database or its key. inferd serves any process
+# crown-contextd's state directory, so not its database or its key, nor the runtime directory
+# with the user bus and the Wayland socket. inferd serves any process
 # of the user (a 0600 socket in the runtime directory) and does not identify its peer, so the
 # user namespace these options make costs nothing here.
 [Unit]
@@ -29,7 +30,12 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=yes
-InaccessiblePaths=-%S/crownos/context
+# crown-contextd's state directory (its database and key) and the whole runtime directory: the
+# user bus, the systemd socket, the Wayland and audio sockets. The inferd socket comes from the
+# socket unit as a file descriptor. ExecStartPre makes the state directory first, unsandboxed,
+# so the rule always applies.
+ExecStartPre=+/usr/bin/mkdir -p -m 0700 %S/crownos/context
+InaccessiblePaths=%S/crownos/context %t
 CacheDirectory=crownos/context
 ReadWritePaths=%C/crownos/context
 LockPersonality=yes

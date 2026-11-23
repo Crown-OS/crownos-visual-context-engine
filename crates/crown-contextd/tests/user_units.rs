@@ -8,7 +8,8 @@
 //! The packaged user units, run by a private `systemd --user`. crown-contextd identifies the
 //! program of an API caller; a unit option that makes a user namespace would hide it, as
 //! `PrivateTmp=yes` shows. crown-context-inferd serves processes of the user from inside its
-//! file system sandbox, which closes crown-contextd's state directory, database and key.
+//! file system sandbox, which closes crown-contextd's state directory, database and key, and the
+//! runtime directory with the user bus.
 //!
 //! The manager has its own runtime directory, unit path, configuration and cgroup, so it never
 //! touches the session's user manager or its units. It is stopped by its PID.
@@ -40,6 +41,7 @@ check dir state "$STATE"
 check file database "$STATE/$DATABASE"
 check file key "$STATE/$KEY"
 touch "$CACHE/probe" 2>/dev/null && echo "open cache" || echo "closed cache"
+[ -e "$RUNTIME/bus" ] && echo "open bus" || echo "closed bus"
 "#;
 const TARGETS: [&str; 5] = [
     "default",
@@ -176,7 +178,7 @@ impl UserManager {
             drop_in.join("test.conf"),
             format!(
                 "[Service]\nEnvironment=STATE={}\nEnvironment=DATABASE={DATABASE_FILE}\n\
-                 Environment=KEY={KEY_FILE}\nEnvironment=CACHE=%C/crownos/context\n\
+                 Environment=KEY={KEY_FILE}\nEnvironment=CACHE=%C/crownos/context\nEnvironment=RUNTIME=%t\n\
                  StandardOutput=append:{}\nStandardError=append:{}\n",
                 state.display(),
                 log.display(),
@@ -349,6 +351,7 @@ fn the_packaged_units_identify_their_peers() {
     for file in [DATABASE_FILE, KEY_FILE] {
         assert!(state.join(file).is_file(), "contextd made no {file}");
     }
+    let _bus = std::os::unix::net::UnixListener::bind(manager.runtime.join("bus")).unwrap();
     manager.install_sandbox_probe(&state);
     assert!(manager.systemctl(&["start", PROBE]));
     let probe = manager.log("probe.log");
@@ -361,6 +364,7 @@ fn the_packaged_units_identify_their_peers() {
         "closed database",
         "closed key",
         "open cache",
+        "closed bus",
     ] {
         assert!(
             probe.lines().any(|seen| seen == line),
