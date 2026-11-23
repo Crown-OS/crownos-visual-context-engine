@@ -42,16 +42,19 @@ impl RegionCopy {
             MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
         )?;
         let mut file = File::from(memfd);
-        let mut rows = RowBuffer::default();
-        for y in bounds.y..bounds.bottom() {
-            let row = rows
-                .read(frame, bounds.x, y, bounds.width)
-                .ok_or(RegionCopyError::OutsideFrame(bounds))?;
-            file.write_all(row)?;
+        let mut written = 0;
+        let sealed = copy_rows(&mut file, frame, bounds, &mut written).and_then(|()| {
+            rustix::fs::fcntl_add_seals(&file, REQUIRED_SEALS | SealFlags::SEAL)
+                .map_err(RegionCopyError::from)
+        });
+        if let Err(error) = sealed {
+            zero_written(&file, written);
+            return Err(error);
         }
-        let memfd = OwnedFd::from(file);
-        rustix::fs::fcntl_add_seals(&memfd, REQUIRED_SEALS | SealFlags::SEAL)?;
-        Ok(Self { memfd, bounds })
+        Ok(Self {
+            memfd: OwnedFd::from(file),
+            bounds,
+        })
     }
 
     /// Where the region is, in frame pixels.
@@ -65,6 +68,38 @@ impl RegionCopy {
 
     pub fn memfd(&self) -> BorrowedFd<'_> {
         self.memfd.as_fd()
+    }
+}
+
+fn copy_rows(
+    file: &mut File,
+    frame: &CapturedFrame,
+    bounds: Rect,
+    written: &mut usize,
+) -> Result<(), RegionCopyError> {
+    let mut rows = RowBuffer::default();
+    for y in bounds.y..bounds.bottom() {
+        let row = rows
+            .read(frame, bounds.x, y, bounds.width)
+            .ok_or(RegionCopyError::OutsideFrame(bounds))?;
+        file.write_all(row)?;
+        *written += row.len();
+    }
+    Ok(())
+}
+
+/// A copy that failed before its seal still holds rows: they are overwritten before the memfd
+/// closes, so its pages do not go back to the kernel with pixels on them.
+fn zero_written(file: &File, written: usize) {
+    const CHUNK: usize = 64 * 1024;
+    let zeros = [0_u8; CHUNK];
+    let mut offset = 0;
+    while offset < written {
+        let length = (written - offset).min(CHUNK);
+        match rustix::io::pwrite(file, zeros.get(..length).unwrap_or(&zeros), offset as u64) {
+            Ok(0) | Err(_) => return,
+            Ok(count) => offset += count,
+        }
     }
 }
 

@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
     };
     // The capture pipeline sets the exposure hook before the bridge first connects.
     let capturing = if let Some(inferd) = inferd {
-        let service = capture::spawn(&link, outlet.clone(), inferd, readings)?;
+        let service = capture::spawn(&link, outlet.clone(), inferd, readings.clone())?;
         tokio::spawn({
             let service = Arc::clone(&service);
             async move {
@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
                 }
             }
         });
-        Some(service)
+        Some(pipeline::Capturing { service, readings })
     } else {
         None
     };

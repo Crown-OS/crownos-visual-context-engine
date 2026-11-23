@@ -149,7 +149,8 @@ impl FrameAnalyzer {
 
     /// Analyses `frame`. Everything that needs its pixels runs first: tiles, bands, the line
     /// cache, and sealed copies of the regions the models read. Then the frame is zeroed and
-    /// closed, before any model runs and before any wait for structured text.
+    /// closed, before any model runs. A wait for structured text happens only with no pixel in
+    /// memory.
     pub fn analyse(
         &mut self,
         frame: CapturedFrame,
@@ -163,12 +164,11 @@ impl FrameAnalyzer {
         };
         let target = frame.target.clone();
         let window = &target.window;
-        let first_reading = self.structured_text.window_text(&target);
-        let awaiting = first_reading == StructuredReading::Pending;
-        let structured = match first_reading {
+        let structured = match self.structured_text.window_text(&target) {
             StructuredReading::Text(lines) => Some(lines),
             StructuredReading::Sensitive => return self.withhold(frame),
-            StructuredReading::Pending | StructuredReading::Unavailable => None,
+            StructuredReading::Pending => return self.read_without_pixels(frame, conditions),
+            StructuredReading::Unavailable => None,
         };
         let first_capture = !self.tile_hashes.contains(window);
         let mut changed = self
@@ -202,23 +202,6 @@ impl FrameAnalyzer {
             .flatten();
         let (captured_at, width, height) = (frame.captured_at, frame.width, frame.height);
         drop(frame);
-        let structured = if awaiting {
-            match self
-                .structured_text
-                .wait_for_text(&target, conditions.cancel)
-            {
-                StructuredReading::Text(lines) => Some(lines),
-                StructuredReading::Sensitive => {
-                    drop((ocr_copy, screen_copy));
-                    self.forget_window(window);
-                    return withheld(target.clone(), captured_at, width, height);
-                }
-                StructuredReading::Pending | StructuredReading::Unavailable => None,
-            }
-        } else {
-            structured
-        };
-
         let text = match structured {
             Some(structured) => Some(structured),
             None => crop_plan.map(|plan| {
@@ -271,6 +254,51 @@ impl FrameAnalyzer {
             self.line_caches.forget_window(window);
             outcome.text = None;
             outcome.description = None;
+            outcome.secret_found = true;
+        }
+        outcome
+    }
+
+    /// A reading of the window is on its way: the frame is zeroed before any of its pixels is
+    /// read, then the analysis waits for the reading with no pixel in memory. Without a reading
+    /// in time there is no OCR and no caption; the next capture covers the window.
+    fn read_without_pixels(
+        &mut self,
+        frame: CapturedFrame,
+        conditions: AnalysisConditions<'_>,
+    ) -> CaptureOutcome {
+        let (target, captured_at, width, height) = (
+            frame.target.clone(),
+            frame.captured_at,
+            frame.width,
+            frame.height,
+        );
+        drop(frame);
+        let text = match self
+            .structured_text
+            .wait_for_text(&target, conditions.cancel)
+        {
+            StructuredReading::Text(lines) => Some(lines),
+            StructuredReading::Sensitive => {
+                self.forget_window(&target.window);
+                return withheld(target, captured_at, width, height);
+            }
+            StructuredReading::Pending | StructuredReading::Unavailable => None,
+        };
+        let mut outcome = CaptureOutcome {
+            target,
+            captured_at,
+            width,
+            height,
+            damage_permille: 0,
+            text,
+            description: None,
+            secret_found: false,
+            withheld: false,
+            cancelled: conditions.cancel.is_cancelled(),
+        };
+        if contains_secret(&outcome) {
+            outcome.text = None;
             outcome.secret_found = true;
         }
         outcome

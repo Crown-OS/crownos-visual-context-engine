@@ -26,11 +26,13 @@ pub enum StructuredReading {
 }
 
 pub trait StructuredText: Send {
-    /// What is known now, without a wait. May ask for a new reading and answer `Pending`.
+    /// What is known now, without a wait: `Pending` when a reading asked for at the capture
+    /// request has not come yet.
     fn window_text(&mut self, target: &CaptureTarget) -> StructuredReading;
 
     /// Waits for the reading that `window_text` answered `Pending` for. The capture calls it
-    /// only after its frame is zeroed, and it returns when `cancel` fires.
+    /// only after its frame is zeroed and before any copy exists, and it returns when `cancel`
+    /// fires.
     fn wait_for_text(
         &mut self,
         target: &CaptureTarget,

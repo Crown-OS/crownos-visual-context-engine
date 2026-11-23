@@ -39,14 +39,10 @@ fn reading_of(text: Option<AccessibleText>) -> StructuredReading {
 
 impl StructuredText for WindowStructuredText {
     fn window_text(&mut self, target: &CaptureTarget) -> StructuredReading {
-        let reading = reading_of(
+        reading_of(
             self.accessibility
                 .latest(&target.window, target.requested_at),
-        );
-        if reading == StructuredReading::Pending {
-            self.accessibility.request(&target.window);
-        }
-        reading
+        )
     }
 
     fn wait_for_text(

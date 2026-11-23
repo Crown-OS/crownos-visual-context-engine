@@ -403,10 +403,27 @@ fn a_password_field_seen_during_the_wait_withholds_the_capture() {
         scripted_analyzer(&models, reading).analyse(line_at(10, vec![]), plugged_in(&cancel));
     assert!(outcome.withheld);
     assert_eq!(models.ocr_calls() + models.describe_calls(), 0);
-    let open = open_inodes();
-    let seen = models.copies_seen.lock().unwrap().clone();
-    assert!(seen.iter().all(|inode| !open.contains(inode)));
+    assert!(models.copies_seen.lock().unwrap().is_empty());
     assert!(outcome.observations().is_empty());
+}
+
+#[test]
+fn a_reading_that_does_not_come_leaves_the_frame_unread() {
+    let models = FakeModels::reading("fn main() {");
+    let frame = line_at(10, vec![]);
+    let mut reading =
+        ScriptedReading::new(StructuredReading::Pending, StructuredReading::Unavailable);
+    reading.frame_memfd = Some(memfd_reader(&frame));
+    let zero = Arc::clone(&reading.zero_while_waiting);
+    let cancel = AtomicBool::new(false);
+    let outcome = scripted_analyzer(&models, reading).analyse(frame, plugged_in(&cancel));
+    assert!(
+        zero.load(Ordering::Relaxed),
+        "the frame held pixels during the wait"
+    );
+    assert!(outcome.text.is_none() && outcome.description.is_none());
+    assert_eq!(models.ocr_calls() + models.describe_calls(), 0);
+    assert!(models.copies_seen.lock().unwrap().is_empty());
 }
 
 #[test]

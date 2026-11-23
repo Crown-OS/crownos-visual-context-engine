@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use context_capture::{CaptureHold, CaptureScheduler, CaptureService};
 use context_collect::CompositorLink;
+use context_collect::a11y::RecentReadings;
 use context_collect::apps::AppResolver;
 use context_core::{
     Observation, ObservationKind, SessionState, Timestamp, WindowIdent, WindowRecord,
@@ -69,6 +70,13 @@ impl Pipeline {
     }
 }
 
+/// What the pipeline captures with: the capture service, and the a11y readings it asks for
+/// when it requests a capture, so a reading is often there by the time the frame comes.
+pub(crate) struct Capturing {
+    pub(crate) service: Arc<CaptureService>,
+    pub(crate) readings: RecentReadings,
+}
+
 pub(crate) fn spawn(
     observations: Receiver<Observation>,
     policy: Arc<Policy>,
@@ -76,7 +84,7 @@ pub(crate) fn spawn(
     shared: Arc<Mutex<Shared>>,
     events: UnboundedSender<Outgoing>,
     link: CompositorLink,
-    capturing: Option<Arc<CaptureService>>,
+    capturing: Option<Capturing>,
 ) -> Result<Pipeline> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread = std::thread::Builder::new()
@@ -117,7 +125,7 @@ struct Worker {
     last_context: Option<Instant>,
     pending_context: Option<CurrentContext>,
     last_snapshot: Instant,
-    capturing: Option<Arc<CaptureService>>,
+    capturing: Option<Capturing>,
     scheduler: CaptureScheduler,
     capture_output: CaptureOutput,
 }
@@ -282,7 +290,10 @@ impl Worker {
         shared.locally_sensitive.forget_expired();
         let target = capture::target(&shared, &self.link, &self.policy, trigger, window.as_ref());
         match target {
-            Some(target) => capturing.capture(target),
+            Some(target) => {
+                capturing.readings.request(&target.window);
+                capturing.service.capture(target);
+            }
             None => tracing::debug!(?trigger, "a capture was due but a gate refused it"),
         }
     }
@@ -307,7 +318,7 @@ impl Worker {
     /// A focus change ends the capture session of the old window. A pause or a lock holds all
     /// captures, drops the queued frames and the output that waits for a segment.
     fn follow_capture_gates(&mut self, kind: &ObservationKind) {
-        let Some(service) = &self.capturing else {
+        let Some(Capturing { service, .. }) = &self.capturing else {
             return;
         };
         match kind {
