@@ -1,3 +1,9 @@
+# No file system or network namespace options (ProtectSystem=, ProtectHome=, ReadWritePaths=,
+# PrivateTmp=, PrivateNetwork= and the like). In a user unit each of them puts the process in a
+# new user namespace. Reading /proc/<pid>/exe of a peer (an API caller) is a ptrace-read check, and the kernel
+# refuses it across user namespaces, so every peer would be unidentified. The user also owns
+# that namespace, so any other process of the user could attach to this one in spite of
+# PR_SET_DUMPABLE=0. The hardening is seccomp, address families and resource limits.
 [Unit]
 Description=CrownOS visual context engine
 PartOf=graphical-session.target
@@ -17,13 +23,10 @@ RuntimeDirectory=crownos
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=%S/crownos/context %C/crownos/context
 StateDirectory=crownos/context
 CacheDirectory=crownos/context
-PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
 MemoryDenyWriteExecute=yes
 LockPersonality=yes
 SystemCallFilter=@system-service

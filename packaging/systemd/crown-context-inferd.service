@@ -1,3 +1,9 @@
+# No file system or network namespace options (ProtectSystem=, ProtectHome=, ReadWritePaths=,
+# PrivateTmp=, PrivateNetwork= and the like). In a user unit each of them puts the process in a
+# new user namespace. Reading /proc/<pid>/exe of a peer (crown-contextd) is a ptrace-read check, and the kernel
+# refuses it across user namespaces, so every peer would be unidentified. The user also owns
+# that namespace, so any other process of the user could attach to this one in spite of
+# PR_SET_DUMPABLE=0. The hardening is seccomp, address families and resource limits.
 [Unit]
 Description=CrownOS context inference worker
 Requires=crown-context-inferd.socket
@@ -13,18 +19,15 @@ Environment=MESA_SHADER_CACHE_DIR=%C/crownos/context/mesa
 Environment=__GL_SHADER_DISK_CACHE_PATH=%C/crownos/context/nvidia
 Environment=CUDA_CACHE_PATH=%C/crownos/context/cuda
 # Models, prompts and pixels stay in this process: no network, no swap, no core dumps.
-PrivateNetwork=yes
 RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
 MemorySwapMax=0
 MemoryZSwapMax=0
 MemoryHigh=6G
 MemoryMax=8G
 LimitCORE=0
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
 CacheDirectory=crownos/context
-ReadWritePaths=%C/crownos/context
 LockPersonality=yes
 RestrictRealtime=yes
 SystemCallArchitectures=native

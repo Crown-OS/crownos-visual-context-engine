@@ -17,7 +17,9 @@ pub(crate) fn authorizer() -> Authorizer {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     Authorizer::Custom(Box::new(move |credentials| {
         let accepted = is_engine(credentials, development.as_deref(), home.as_deref());
-        if !accepted {
+        if accepted {
+            tracing::info!(pid = credentials.pid, "serving crown-contextd");
+        } else {
             tracing::warn!(
                 pid = credentials.pid,
                 "refused a peer that is not crown-contextd"
